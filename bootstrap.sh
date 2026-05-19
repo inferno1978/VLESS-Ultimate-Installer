@@ -70,12 +70,12 @@ ok "Python ${PY_VER}: OK"
 # [4] Загрузка
 echo -e "\n${BOLD}[4/5] Загрузка VLESS Ultimate${NC}"
 INSTALL_DIR="/opt/vless-ultimate"
-REPO_URL="https://github.com/inferno1978/VLESS-Ultimate"
+REPO_URL="https://github.com/inferno1978/VLESS-Ultimate-Installer"
 
 if [[ -d "${INSTALL_DIR}/.git" ]]; then
     info "Обновление существующей установки..."
     cd "$INSTALL_DIR"
-    git pull --quiet origin master 2>/dev/null && ok "Обновлено" || warn "Не удалось обновить — используем текущую версию"
+    git pull --quiet origin main 2>/dev/null && ok "Обновлено" || warn "Не удалось обновить — используем текущую версию"
 else
     info "Клонирование репозитория..."
     if ! git clone --quiet --depth 1 "$REPO_URL" "$INSTALL_DIR" 2>/dev/null; then
