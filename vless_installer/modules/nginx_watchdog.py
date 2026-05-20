@@ -211,7 +211,8 @@ def do_manage_nginx_watchdog() -> None:
         if active:
             _box_item('1', 'Отключить watchdog')
         else:
-            _box_item('1', 'Включить watchdog (timer каждые 2 минуты)')
+            _box_item('1', 'Включить watchdog')
+            _box_row(f'     {DIM}(timer каждые 2 минуты){NC}')
         _box_item('2', 'Запустить проверку вручную прямо сейчас')
         _box_item('3', 'Показать полный лог')
         _box_back()
@@ -232,7 +233,8 @@ def do_manage_nginx_watchdog() -> None:
             else:
                 nginx_watchdog_install()
                 _box_top("🔁  NGINX WATCHDOG — ВКЛЮЧЁН")
-                _box_row(f"  {GREEN}Watchdog установлен, timer активен (каждые 2 мин).{NC}")
+                _box_row(f"  {GREEN}Watchdog установлен,{NC}")
+                _box_row(f"  {GREEN}timer активен (каждые 2 мин).{NC}")
                 _box_bottom()
             input(f'{CYAN}Нажмите Enter...{NC}')
 
@@ -245,7 +247,8 @@ def do_manage_nginx_watchdog() -> None:
                 _box_bottom()
                 subprocess.run(['bash', str(_SCRIPT)])
             else:
-                _box_row(f"  {YELLOW}Watchdog не установлен — сначала включите его (пункт 1).{NC}")
+                _box_row(f"  {YELLOW}Watchdog не установлен —{NC}")
+                _box_row(f"  {YELLOW}сначала включите его (пункт 1).{NC}")
                 _box_bottom()
             input(f'{CYAN}Нажмите Enter...{NC}')
 

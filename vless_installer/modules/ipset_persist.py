@@ -191,9 +191,11 @@ def do_manage_ipset_persist() -> None:
         if enabled:
             _box_item('1', 'Удалить юнит')
         else:
-            _box_item('1', 'Установить юнит (восстановление при boot)')
+            _box_item('1', 'Установить юнит')
+            _box_row(f'     {DIM}(восстановление при boot){NC}')
         _box_item('2', 'Сохранить текущий ipset → /etc/ipset.conf')
-        _box_item('3', 'Показать содержимое /etc/ipset.conf (первые 30 строк)')
+        _box_item('3', 'Показать /etc/ipset.conf')
+        _box_row(f'     {DIM}(первые 30 строк){NC}')
         _box_back()
         _box_bottom()
 
@@ -218,7 +220,8 @@ def do_manage_ipset_persist() -> None:
                 else:
                     ipset_restore_unit_install()
                     _box_top("📦  IPSET PERSIST — УСТАНОВЛЕН")
-                    _box_row(f"  {GREEN}Юнит установлен, ipset восстановится при boot.{NC}")
+                    _box_row(f"  {GREEN}Юнит установлен,{NC}")
+                    _box_row(f"  {GREEN}ipset восстановится при boot.{NC}")
                     _box_bottom()
             input(f'{CYAN}Нажмите Enter...{NC}')
 

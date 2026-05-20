@@ -317,7 +317,8 @@ def do_cluster_menu() -> None:
                 _box_row(f"    {i}. {nd.get('host','?')}:{nd.get('port',443)}")
         else:
             _box_row(f"  {YELLOW}Нет Exit Nodes в state.json.{NC}")
-            _box_row(f"  {DIM}Добавьте каскадный Режим B для появления нод.{NC}")
+            _box_row(f"  {DIM}Добавьте каскадный Режим B{NC}")
+            _box_row(f"  {DIM}для появления нод.{NC}")
         _box_sep()
         _box_item("1", "Диагностика всех нод")
         _box_item("2", "Перезапуск Xray на всех нодах")
@@ -376,7 +377,8 @@ def do_cluster_menu() -> None:
         elif ch == '4':
             from vless_installer._core import _box_top, _box_row, _box_bottom
             _box_top(f"🔑  РОТАЦИЯ UUID — {len(nodes)} нод")
-            _box_row(f"  {YELLOW}⚠  После ротации обновите конфиг Entry Node вручную!{NC}")
+            _box_row(f"  {YELLOW}⚠  После ротации обновите{NC}")
+            _box_row(f"  {YELLOW}конфиг Entry Node вручную!{NC}")
             _box_row(f"  Новые UUID будут выведены в результатах.")
             _box_bottom()
             try:
@@ -384,16 +386,21 @@ def do_cluster_menu() -> None:
             except (EOFError, KeyboardInterrupt):
                 continue
             if ans in ('y', 'yes', 'д', 'да'):
-                _print_results(cluster_run(nodes, op_rotate_uuid, parallel=False), "РОТАЦИЯ UUID")
+                _print_results(
+                    cluster_run(nodes, op_rotate_uuid, parallel=False),
+                    "РОТАЦИЯ UUID",
+                )
                 from vless_installer._core import _box_top, _box_row, _box_bottom
                 _box_top("ℹ️   ВАЖНО")
-                _box_row(f"  {YELLOW}Скопируйте UUID выше и обновите конфиг Entry Node.{NC}")
+                _box_row(f"  {YELLOW}Скопируйте UUID выше и{NC}")
+                _box_row(f"  {YELLOW}обновите конфиг Entry Node.{NC}")
                 _box_bottom()
 
         elif ch == '5':
             from vless_installer._core import _box_top, _box_row, _box_bottom
             _box_top("💬  ПРОИЗВОЛЬНАЯ КОМАНДА")
-            _box_row(f"  Введите команду для выполнения на всех нодах:")
+            _box_row(f"  Введите команду для")
+            _box_row(f"  выполнения на всех нодах:")
             _box_bottom()
             try:
                 cmd = input(f'{CYAN}Команда:{NC} ').strip()
@@ -410,8 +417,11 @@ def do_cluster_menu() -> None:
                 h = nd.get('host', '')
                 ok, reason = _check_ssh(h, key)
                 icon = f'{GREEN}✓{NC}' if ok else f'{RED}✗{NC}'
-                extra = f'  {DIM}{reason}{NC}' if not ok else f'  {GREEN}OK{NC}'
-                _box_row(f"  {icon} {BOLD}{h}{NC}{extra}")
+                if ok:
+                    _box_row(f"  {icon} {BOLD}{h}{NC}  {GREEN}OK{NC}")
+                else:
+                    _box_row(f"  {icon} {BOLD}{h}{NC}")
+                    _box_row(f"      {DIM}{reason}{NC}")
             _box_bottom()
 
         elif ch in ('q', ''):
