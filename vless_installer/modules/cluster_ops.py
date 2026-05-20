@@ -270,21 +270,25 @@ def load_exit_nodes() -> list[dict]:
 
 
 # ── Вывод результатов ─────────────────────────────────────────────────────────
-def _print_results(results: dict[str, NodeResult]) -> None:
+def _print_results(results: dict[str, NodeResult], title: str = "РЕЗУЛЬТАТ") -> None:
+    from vless_installer._core import (
+        _box_top, _box_row, _box_sep, _box_bottom, _box_item,
+    )
     ok_n  = sum(1 for r in results.values() if r.ok)
     all_n = len(results)
     color = GREEN if ok_n == all_n else (YELLOW if ok_n > 0 else RED)
-    print()
-    print(f'  {color}Результат: {ok_n}/{all_n} нод ОК{NC}')
-    print()
+
+    _box_top(f"📊  {title}")
+    _box_row(f"  {color}Итог: {ok_n}/{all_n} нод ОК{NC}")
+    _box_sep()
     for host, res in sorted(results.items()):
         icon = f'{GREEN}✓{NC}' if res.ok else f'{RED}✗{NC}'
-        print(f'  {icon} {BOLD}{host}{NC}  {DIM}({res.duration:.1f}s){NC}')
-        for line in (res.output or '').splitlines()[:8]:
-            print(f'    {DIM}{line[:80]}{NC}')
+        _box_row(f"  {icon} {BOLD}{host}{NC}  {DIM}({res.duration:.1f}s){NC}")
+        for line in (res.output or '').splitlines()[:6]:
+            _box_row(f"    {DIM}{line[:68]}{NC}")
         if res.error:
-            print(f'    {RED}{res.error[:100]}{NC}')
-        print()
+            _box_row(f"    {RED}{res.error[:70]}{NC}")
+    _box_bottom()
 
 
 # ── Проверка SSH-доступа ──────────────────────────────────────────────────────
@@ -330,66 +334,91 @@ def do_cluster_menu() -> None:
             break
 
         if not nodes and ch not in ('q', ''):
-            print(f'  {YELLOW}Нет Exit Nodes — нечего делать{NC}')
+            from vless_installer._core import _box_top, _box_row, _box_bottom
+            _box_top("⚠️   НЕТ НОД")
+            _box_row(f"  {YELLOW}Нет Exit Nodes — нечего делать{NC}")
+            _box_bottom()
             time.sleep(1)
             continue
 
         if ch == '1':
-            print(f'\n  {CYAN}Диагностика {len(nodes)} нод...{NC}')
-            _print_results(cluster_run(nodes, op_diagnostics))
+            from vless_installer._core import _box_top, _box_row, _box_bottom
+            _box_top(f"🔍  ДИАГНОСТИКА — {len(nodes)} нод")
+            _box_row(f"  {CYAN}Выполняется...{NC}")
+            _box_bottom()
+            _print_results(cluster_run(nodes, op_diagnostics), "ДИАГНОСТИКА")
 
         elif ch == '2':
+            from vless_installer._core import _box_top, _box_row, _box_bottom
+            _box_top(f"🔄  ПЕРЕЗАПУСК XRAY — {len(nodes)} нод")
+            _box_row(f"  Перезапустить Xray на всех нодах?")
+            _box_bottom()
             try:
-                ans = input(f'  Перезапустить Xray на {len(nodes)} нодах? [y/N] ').strip().lower()
+                ans = input(f'{CYAN}[y/N]:{NC} ').strip().lower()
             except (EOFError, KeyboardInterrupt):
                 continue
             if ans in ('y', 'yes', 'д', 'да'):
-                _print_results(cluster_run(nodes, op_restart))
+                _print_results(cluster_run(nodes, op_restart), "ПЕРЕЗАПУСК")
 
         elif ch == '3':
+            from vless_installer._core import _box_top, _box_row, _box_bottom
+            _box_top(f"⬆️   ОБНОВЛЕНИЕ XRAY-CORE — {len(nodes)} нод")
+            _box_row(f"  {YELLOW}Может занять 2–3 минуты на ноду.{NC}")
+            _box_row(f"  Обновить Xray-core на всех нодах?")
+            _box_bottom()
             try:
-                ans = input(f'  Обновить Xray-core на {len(nodes)} нодах? [y/N] ').strip().lower()
+                ans = input(f'{CYAN}[y/N]:{NC} ').strip().lower()
             except (EOFError, KeyboardInterrupt):
                 continue
             if ans in ('y', 'yes', 'д', 'да'):
-                print(f'  {YELLOW}Может занять 2–3 минуты на ноду...{NC}')
-                _print_results(cluster_run(nodes, op_update_xray))
+                _print_results(cluster_run(nodes, op_update_xray), "ОБНОВЛЕНИЕ")
 
         elif ch == '4':
-            print(f'\n  {YELLOW}⚠  После ротации UUID обновите конфиг Entry Node вручную!{NC}')
-            print(f'  Новые UUID будут выведены ниже.')
+            from vless_installer._core import _box_top, _box_row, _box_bottom
+            _box_top(f"🔑  РОТАЦИЯ UUID — {len(nodes)} нод")
+            _box_row(f"  {YELLOW}⚠  После ротации обновите конфиг Entry Node вручную!{NC}")
+            _box_row(f"  Новые UUID будут выведены в результатах.")
+            _box_bottom()
             try:
-                ans = input(f'\n  Продолжить? [y/N] ').strip().lower()
+                ans = input(f'{CYAN}[y/N]:{NC} ').strip().lower()
             except (EOFError, KeyboardInterrupt):
                 continue
             if ans in ('y', 'yes', 'д', 'да'):
-                _print_results(cluster_run(nodes, op_rotate_uuid, parallel=False))
-                print(f'  {YELLOW}Скопируйте UUID выше и обновите конфиг Entry Node.{NC}')
+                _print_results(cluster_run(nodes, op_rotate_uuid, parallel=False), "РОТАЦИЯ UUID")
+                from vless_installer._core import _box_top, _box_row, _box_bottom
+                _box_top("ℹ️   ВАЖНО")
+                _box_row(f"  {YELLOW}Скопируйте UUID выше и обновите конфиг Entry Node.{NC}")
+                _box_bottom()
 
         elif ch == '5':
+            from vless_installer._core import _box_top, _box_row, _box_bottom
+            _box_top("💬  ПРОИЗВОЛЬНАЯ КОМАНДА")
+            _box_row(f"  Введите команду для выполнения на всех нодах:")
+            _box_bottom()
             try:
-                cmd = input('  Команда: ').strip()
+                cmd = input(f'{CYAN}Команда:{NC} ').strip()
             except (EOFError, KeyboardInterrupt):
                 continue
             if cmd:
-                _print_results(cluster_run(nodes, op_custom, cmd=cmd))
+                _print_results(cluster_run(nodes, op_custom, cmd=cmd), f"КОМАНДА: {cmd[:40]}")
 
         elif ch == '6':
-            print(f'\n  {CYAN}Проверка SSH...{NC}')
+            from vless_installer._core import _box_top, _box_row, _box_bottom
             key = _find_ssh_key()
+            _box_top(f"🔐  ПРОВЕРКА SSH — {len(nodes)} нод")
             for nd in nodes:
                 h = nd.get('host', '')
                 ok, reason = _check_ssh(h, key)
                 icon = f'{GREEN}✓{NC}' if ok else f'{RED}✗{NC}'
-                extra = f' — {reason}' if not ok else ''
-                print(f'  {icon} {h}{extra}')
-            print()
+                extra = f'  {DIM}{reason}{NC}' if not ok else f'  {GREEN}OK{NC}'
+                _box_row(f"  {icon} {BOLD}{h}{NC}{extra}")
+            _box_bottom()
 
         elif ch in ('q', ''):
             break
 
         if ch not in ('q', ''):
             try:
-                input(f'  {CYAN}Нажмите Enter...{NC}')
+                input(f'{CYAN}Нажмите Enter...{NC}')
             except (EOFError, KeyboardInterrupt):
                 pass

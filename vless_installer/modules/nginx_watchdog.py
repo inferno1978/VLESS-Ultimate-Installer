@@ -223,26 +223,43 @@ def do_manage_nginx_watchdog() -> None:
             break
 
         if ch == '1':
+            from vless_installer._core import _box_top, _box_row, _box_bottom
             if active:
                 nginx_watchdog_remove()
+                _box_top("🔁  NGINX WATCHDOG — ОТКЛЮЧЁН")
+                _box_row(f"  {YELLOW}Watchdog остановлен и удалён.{NC}")
+                _box_bottom()
             else:
                 nginx_watchdog_install()
-            input(f'  {CYAN}Нажмите Enter...{NC}')
+                _box_top("🔁  NGINX WATCHDOG — ВКЛЮЧЁН")
+                _box_row(f"  {GREEN}Watchdog установлен, timer активен (каждые 2 мин).{NC}")
+                _box_bottom()
+            input(f'{CYAN}Нажмите Enter...{NC}')
 
         elif ch == '2':
+            from vless_installer._core import _box_top, _box_row, _box_bottom
+            _box_top("🔁  РУЧНАЯ ПРОВЕРКА NGINX")
             if _SCRIPT.exists():
+                import subprocess
+                _box_row(f"  {CYAN}Запуск...{NC}")
+                _box_bottom()
                 subprocess.run(['bash', str(_SCRIPT)])
             else:
-                _warn('Watchdog не установлен')
-            input(f'  {CYAN}Нажмите Enter...{NC}')
+                _box_row(f"  {YELLOW}Watchdog не установлен — сначала включите его (пункт 1).{NC}")
+                _box_bottom()
+            input(f'{CYAN}Нажмите Enter...{NC}')
 
         elif ch == '3':
-            print()
+            from vless_installer._core import _box_top, _box_row, _box_sep, _box_bottom
+            _box_top("🔁  ЛОГ NGINX WATCHDOG")
             if _LOG.exists():
-                print(_LOG.read_text(errors='replace')[-4000:])
+                lines = _LOG.read_text(errors='replace').splitlines()[-20:]
+                for line in lines:
+                    _box_row(f"  {DIM}{line[:68]}{NC}")
             else:
-                _warn('Лог пуст или не создан')
-            input(f'  {CYAN}Нажмите Enter...{NC}')
+                _box_row(f"  {YELLOW}Лог пуст или ещё не создан.{NC}")
+            _box_bottom()
+            input(f'{CYAN}Нажмите Enter...{NC}')
 
         elif ch in ('q', ''):
             break

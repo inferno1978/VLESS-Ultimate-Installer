@@ -203,29 +203,46 @@ def do_manage_ipset_persist() -> None:
             break
 
         if ch == '1':
+            from vless_installer._core import _box_top, _box_row, _box_bottom
             if enabled:
                 ipset_restore_unit_remove()
+                _box_top("📦  IPSET PERSIST — УДАЛЁН")
+                _box_row(f"  {YELLOW}Юнит xray-ipset-restore удалён.{NC}")
+                _box_bottom()
             else:
                 if not conf_exists:
-                    _warn('Сначала сохраните ipset (пункт 2) — иначе при boot нечего восстанавливать')
-                ipset_restore_unit_install()
-            input(f'  {CYAN}Нажмите Enter...{NC}')
+                    _box_top("📦  IPSET PERSIST — ПРЕДУПРЕЖДЕНИЕ")
+                    _box_row(f"  {YELLOW}⚠  Файл /etc/ipset.conf отсутствует!{NC}")
+                    _box_row(f"  Сначала сохраните ipset (пункт 2).")
+                    _box_bottom()
+                else:
+                    ipset_restore_unit_install()
+                    _box_top("📦  IPSET PERSIST — УСТАНОВЛЕН")
+                    _box_row(f"  {GREEN}Юнит установлен, ipset восстановится при boot.{NC}")
+                    _box_bottom()
+            input(f'{CYAN}Нажмите Enter...{NC}')
 
         elif ch == '2':
+            from vless_installer._core import _box_top, _box_row, _box_bottom
             ipset_save()
-            input(f'  {CYAN}Нажмите Enter...{NC}')
+            _box_top("📦  IPSET СОХРАНЁН")
+            _box_row(f"  {GREEN}Текущий ipset сохранён → /etc/ipset.conf{NC}")
+            _box_bottom()
+            input(f'{CYAN}Нажмите Enter...{NC}')
 
         elif ch == '3':
-            print()
+            from vless_installer._core import _box_top, _box_row, _box_bottom
+            _box_top("📦  СОДЕРЖИМОЕ /etc/ipset.conf")
             if conf_exists:
                 lines = _IPSET_CONF.read_text(errors='replace').splitlines()[:30]
                 for line in lines:
-                    print(f'    {DIM}{line}{NC}')
+                    _box_row(f"  {DIM}{line[:68]}{NC}")
                 if conf_entries > 30:
-                    print(f'    {DIM}... ещё {conf_entries - 30} записей{NC}')
+                    _box_row(f"  {DIM}... ещё {conf_entries - 30} записей{NC}")
             else:
-                _warn('Файл /etc/ipset.conf не существует')
-            input(f'  {CYAN}Нажмите Enter...{NC}')
+                _box_row(f"  {YELLOW}Файл /etc/ipset.conf не существует.{NC}")
+            _box_bottom()
+            input(f'{CYAN}Нажмите Enter...{NC}')
 
         elif ch in ('q', ''):
             break
