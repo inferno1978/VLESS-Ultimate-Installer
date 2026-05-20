@@ -81,8 +81,8 @@ except ImportError:
         if title:
             pad = _BOX_W - _wlen(title); lpad = pad//2; rpad = pad-lpad
             print(f"{CYAN}║{NC}{' '*lpad}{BOLD}{WHITE}{title}{NC}{' '*rpad}{CYAN}║{NC}")
-            print(f"{CYAN}╠{'═'*_BOX_W}╣{NC}")
-    def _box_sep(): print(f"{CYAN}╠{'═'*_BOX_W}╣{NC}")
+            print(f"{CYAN}╠{'═'*_BOX_W}║{NC}")
+    def _box_sep(): print(f"{CYAN}╠{'═'*_BOX_W}║{NC}")
     def _box_bot(): print(f"{CYAN}╚{'═'*_BOX_W}╝{NC}")
     def _box_row(text=""):
         import unicodedata as _ud, re as _re

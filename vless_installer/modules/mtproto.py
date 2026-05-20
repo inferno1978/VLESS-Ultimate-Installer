@@ -109,10 +109,10 @@ def _box_top(title: str = "") -> None:
         lpad = pad // 2
         rpad = pad - lpad
         print(f"{CYAN}║{NC}{' ' * lpad}{BOLD}{WHITE}{title}{NC}{' ' * rpad}{CYAN}║{NC}")
-        print(f"{CYAN}╠{'═' * _BOX_W}╣{NC}")
+        print(f"{CYAN}╠{'═' * _BOX_W}║{NC}")
 
 def _box_sep() -> None:
-    print(f"{CYAN}╠{'═' * _BOX_W}╣{NC}")
+    print(f"{CYAN}╠{'═' * _BOX_W}║{NC}")
 
 def _box_bot() -> None:
     print(f"{CYAN}╚{'═' * _BOX_W}╝{NC}")

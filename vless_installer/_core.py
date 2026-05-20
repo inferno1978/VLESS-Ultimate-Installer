@@ -12463,7 +12463,7 @@ def awg_full_setup() -> None:
     print(f"{CYAN}║{NC}{' ' * _title_lpad}{_AWG_TITLE_COLOR}{_AWG_TITLE}{NC}{' ' * _title_rpad}{CYAN}║{NC}")
     _scheme_text = f"  Схема: Клиент → Xray(RU) → awg0 → {AWG_EXIT_HOST} → Интернет"
     _scheme_pad  = max(0, _BOX_W - _wcslen(_scheme_text))
-    print(f"{CYAN}╠{'═' * _BOX_W}╣{NC}")
+    print(f"{CYAN}╠{'═' * _BOX_W}║{NC}")
     print(f"{CYAN}║{NC}{_scheme_text}{' ' * _scheme_pad}{CYAN}║{NC}")
     print(f"{CYAN}╚{'═' * _BOX_W}╝{NC}")
     print()
@@ -12579,7 +12579,7 @@ def awg_full_setup() -> None:
         _done_rpad    = _BOX_W - len(_AWG_DONE) - _done_lpad
         print(f"{CYAN}╔{'═' * _BOX_W}╗{NC}")
         print(f"{CYAN}║{NC}{' ' * _done_lpad}{GREEN}{BOLD}{_AWG_DONE}{NC}{' ' * _done_rpad}{CYAN}║{NC}")
-        print(f"{CYAN}╠{'═' * _BOX_W}╣{NC}")
+        print(f"{CYAN}╠{'═' * _BOX_W}║{NC}")
         # детали — через _box_row (голубые ║)
         _box_row_auto(f"  Клиентский конфиг RU-VPS:  {_AWG_ACTIVE_CONF}", cont_indent="    ")
         _box_row_auto(f"  Серверный шаблон exit-VPS: {_AWG_CONF_DIR}/awg0-server-template.conf", cont_indent="    ")
@@ -25790,7 +25790,7 @@ def _as_ask_action(asn: str = "") -> str:
     print()
     print(f"  {CYAN}╔{'═' * (_BW + 4)}╗{NC}")
     print(f"  {CYAN}║{NC}  {BOLD}{_title}{NC}{' ' * max(_title_pad, 0)}  {CYAN}║{NC}")
-    print(f"  {CYAN}╠{'═' * (_BW + 4)}╣{NC}")
+    print(f"  {CYAN}╠{'═' * (_BW + 4)}║{NC}")
     print(_row(f"{GREEN}[1] direct{NC}  — напрямую, минуя VPN"))
     print(_row(f"{YELLOW}[2] proxy{NC}   — через VPN-туннель    "))
     print(_row(f"{RED}[3] block{NC}   — заблокировать        "))
@@ -28218,8 +28218,8 @@ def _box_line_top() -> None:
 
 
 def _box_line_sep() -> None:
-    """Разделитель: ╠════╣"""
-    print(f"{CYAN}╠{'═' * _BOX_W}╣{NC}")
+    """Разделитель: ╠════║"""
+    print(f"{CYAN}╠{'═' * _BOX_W}║{NC}")
 
 
 def _box_line_bot() -> None:
@@ -30816,9 +30816,7 @@ def _menu_security() -> None:
         _awg_na = f"  {DIM}(AWG: недоступно — нет VLESS-нод){NC}" if _awg else f"  {DIM}(Режим B){NC}"
         _awg_na7 = f"  {DIM}(AWG: недоступно){NC}" if _awg else f"  {DIM}(при отказе всех нод){NC}"
         _bal_na  = f"  {DIM}(AWG: недоступно){NC}" if _awg else f"  {DIM}(latency + bandwidth + load){NC}"
-        print()
         _box_top("🛡️  БЕЗОПАСНОСТЬ И АВТОМАТИЗАЦИЯ")
-        _box_row()
         _box_item("1", f"🚫 AutoBan  {DIM}(защита от перебора / TLS-ошибки){NC}")
         _box_item("2", f"🛡️  GeoIP Block  {DIM}(allowlist / blocklist / сканеры){NC}")
         _box_item("3", "🗺️  Управление GeoIP / GeoSite файлами")
@@ -30832,7 +30830,7 @@ def _menu_security() -> None:
         _box_item("W",  f"🔌 AWG Tunnel Watchdog  {DIM}(fallback при падении awg0){NC}")
         _box_item("N",  f"🌐 AWG Multi-Node  {DIM}(ноды, failover, SSH-защита){NC}")
         _box_item("IP", f"📦 ipset Persist  {DIM}(восстановление ipset при reboot){NC}")
-        _box_item("CL", f"🖧  Кластер Exit Nodes  {DIM}(все Exit Nodes по SSH){NC}")
+        _box_item("CL", f"🔗 Кластер Exit Nodes  {DIM}(все Exit Nodes по SSH){NC}")
         _box_item("9", f"🔒 Мониторинг certbot renew  {DIM}(алерт при истечении){NC}")
         _box_item("H", f"🔒 SSH Hardening  {DIM}(порт / ключи / AllowUsers){NC}")
         _box_sep()
@@ -30849,7 +30847,6 @@ def _menu_security() -> None:
             if _ing_on else f"{DIM}выкл{NC}"
         )
         _box_item("G", f"🛡️  Блокировка входящих из РФ  {_ing_str}")
-        _box_row()
         _box_back()
         _box_bottom()
         try:
