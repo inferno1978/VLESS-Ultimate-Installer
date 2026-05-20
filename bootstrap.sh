@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # ============================================================
-#  VLESS Ultimate Installer v4.11 — Bootstrap
-#  bash <(curl -fsSL https://raw.githubusercontent.com/inferno1978/VLESS-Ultimate-Installer/main/bootstrap.sh)
+#  VLESS Ultimate Installer v4.10 — Bootstrap
+#  bash <(curl -fsSL https://raw.githubusercontent.com/inferno1978/VLESS-Ultimate/master/bootstrap.sh)
 # ============================================================
 set -euo pipefail
 
@@ -21,7 +21,7 @@ cat << 'BANNER'
  ╚██╗ ██╔╝██║     ██╔══╝  ╚════██║╚════██║
   ╚████╔╝ ███████╗███████╗███████║███████║
    ╚═══╝  ╚══════╝╚══════╝╚══════╝╚══════╝
-   Ultimate Installer v4.11
+   Ultimate Installer v4.10
 BANNER
 echo -e "${NC}"
 
@@ -29,7 +29,7 @@ echo -e "${NC}"
 echo -e "${BOLD}[1/5] Проверка прав${NC}"
 if [[ $EUID -ne 0 ]]; then
     err "Требуются права root"
-    echo -e "     ${YELLOW}sudo bash <(curl -fsSL https://raw.githubusercontent.com/inferno1978/VLESS-Ultimate-Installer/main/bootstrap.sh)${NC}"
+    echo -e "     ${YELLOW}sudo bash <(curl -fsSL https://raw.githubusercontent.com/inferno1978/VLESS-Ultimate/master/bootstrap.sh)${NC}"
     exit 1
 fi
 ok "root: OK"
@@ -71,22 +71,18 @@ ok "Python ${PY_VER}: OK"
 echo -e "\n${BOLD}[4/5] Загрузка VLESS Ultimate${NC}"
 INSTALL_DIR="/opt/vless-ultimate"
 REPO_URL="https://github.com/inferno1978/VLESS-Ultimate-Installer"
-BRANCH="main"
 
 if [[ -d "${INSTALL_DIR}/.git" ]]; then
     info "Обновление существующей установки..."
     cd "$INSTALL_DIR"
-    git pull --quiet origin "$BRANCH" 2>/dev/null \
-        && ok "Обновлено до последней версии" \
-        || warn "Не удалось обновить — используем текущую версию"
+    git pull --quiet origin main 2>/dev/null && ok "Обновлено" || warn "Не удалось обновить — используем текущую версию"
 else
     info "Клонирование репозитория..."
-    if ! git clone --quiet --depth 1 --branch "$BRANCH" "$REPO_URL" "$INSTALL_DIR" 2>/dev/null; then
+    if ! git clone --quiet --depth 1 "$REPO_URL" "$INSTALL_DIR" 2>/dev/null; then
         warn "git clone не удался — загружаю архив..."
         mkdir -p "$INSTALL_DIR"
-        ARCHIVE="${REPO_URL}/archive/refs/heads/${BRANCH}.tar.gz"
-        ARCHIVE_TMP="/tmp/vless_ultimate.tar.gz"
-        ARCHIVE_DIR="VLESS-Ultimate-Installer-${BRANCH}"
+        ARCHIVE="${REPO_URL}/archive/refs/heads/master.tar.gz"
+        ARCHIVE_TMP="/tmp/vless.tar.gz"
         EXPECTED_SHA256="PLACEHOLDER_SHA256_UPDATE_BEFORE_RELEASE"
 
         curl -fsSL --connect-timeout 30 --retry 3 -o "$ARCHIVE_TMP" "$ARCHIVE" || {
@@ -94,14 +90,30 @@ else
             exit 1
         }
 
+        # SHA256-проверка целостности архива
+        if [[ "$EXPECTED_SHA256" != "PLACEHOLDER_SHA256_UPDATE_BEFORE_RELEASE" ]]; then
+            info "Проверка SHA256..."
+            ACTUAL_SHA256=$(sha256sum "$ARCHIVE_TMP" | awk '{print $1}')
+            if [[ "$ACTUAL_SHA256" != "$EXPECTED_SHA256" ]]; then
+                err "SHA256 не совпадает!"
+                err "  Ожидалось: ${EXPECTED_SHA256}"
+                err "  Получено:  ${ACTUAL_SHA256}"
+                rm -f "$ARCHIVE_TMP"
+                exit 1
+            fi
+            ok "SHA256 OK: ${ACTUAL_SHA256:0:16}..."
+        else
+            warn "SHA256-проверка пропущена (PLACEHOLDER не заменён)"
+        fi
+
         tar -xzf "$ARCHIVE_TMP" -C /tmp/
-        cp -r "/tmp/${ARCHIVE_DIR}/." "$INSTALL_DIR/"
-        rm -rf "/tmp/${ARCHIVE_DIR}" "$ARCHIVE_TMP"
+        cp -r /tmp/VLESS-Ultimate-master/. "$INSTALL_DIR/"
+        rm -rf /tmp/VLESS-Ultimate-master "$ARCHIVE_TMP"
     fi
     ok "Загружено в ${INSTALL_DIR}"
 fi
 
-[[ -f "${INSTALL_DIR}/main.py" ]] || { err "main.py не найден в ${INSTALL_DIR}"; exit 1; }
+[[ -f "${INSTALL_DIR}/main.py" ]] || { err "main.py не найден"; exit 1; }
 
 # [5] Запуск
 echo -e "\n${BOLD}[5/5] Запуск${NC}"
