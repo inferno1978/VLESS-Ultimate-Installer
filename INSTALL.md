@@ -1,9 +1,9 @@
-# Инструкция по установке — VLESS Ultimate Installer v4.10
+# Инструкция по установке — VLESS Ultimate Installer v4.11
 
 ## Быстрый старт (рекомендуется)
 
 ```bash
-bash <(curl -fsSL https://raw.githubusercontent.com/inferno1978/VLESS-Ultimate/master/bootstrap.sh)
+bash <(curl -fsSL https://raw.githubusercontent.com/inferno1978/VLESS-Ultimate-Installer/main/bootstrap.sh)
 ```
 
 Bootstrap скрипт автоматически:
@@ -18,7 +18,7 @@ Bootstrap скрипт автоматически:
 
 ```bash
 # 1. Клонировать репозиторий
-git clone https://github.com/inferno1978/VLESS-Ultimate /opt/vless-ultimate
+git clone https://github.com/inferno1978/VLESS-Ultimate-Installer /opt/vless-ultimate
 cd /opt/vless-ultimate
 
 # 2. Проверить целостность

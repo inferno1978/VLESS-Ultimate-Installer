@@ -4,15 +4,15 @@
 
 | Version | Supported |
 |---------|-----------|
-| 4.10.x  | ✅ Активно |
-| < 4.10  | ❌ Обновитесь |
+| 4.11.x  | ✅ Активно |
+| < 4.11  | ❌ Обновитесь |
 
 ## Reporting a Vulnerability
 
 Если вы обнаружили уязвимость — **не публикуйте её в Issues**.
 
 Напишите напрямую: откройте **приватное Security Advisory** на GitHub:
-`https://github.com/inferno1978/VLESS-Ultimate/security/advisories/new`
+`https://github.com/inferno1978/VLESS-Ultimate-Installer/security/advisories/new`
 
 Либо свяжитесь через контакты в профиле. Ответ — в течение 72 часов.
 
@@ -37,7 +37,7 @@
 
 ### bootstrap.sh и SHA256
 
-Начиная с v4.10 bootstrap.sh поддерживает опциональную SHA256-проверку
+Начиная с v4.11 bootstrap.sh поддерживает опциональную SHA256-проверку
 архива при fallback-загрузке (когда `git clone` недоступен). Переменная
 `EXPECTED_SHA256` в начале блока fallback должна обновляться при каждом релизе:
 

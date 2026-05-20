@@ -1,3 +1,20 @@
+## [4.11] — 2025-05
+
+### Добавлено
+- **Smoke-test после apply** — TCP connect + TLS handshake к своему порту после каждого применения конфига; при провале — предложение аварийного восстановления
+- **nginx Watchdog** — systemd timer каждые 2 мин проверяет nginx; перезапускает + Telegram-уведомление; для Reality-режима делает `systemctl reload xray` (меню: `NW`)
+- **ipset Persistent** — `ipset save` после каждого apply ingress-блокировки + `xray-ipset-restore.service` (Before=xray.service) для восстановления при reboot (меню: `IP`)
+- **Проверка возраста RIPE-файла** — предупреждение (30 дней) и жёсткое предупреждение (90 дней) перед включением ingress-блокировки; баннер в меню статуса
+- **Кластерное управление Exit Nodes** — диагностика, перезапуск, обновление Xray-core, ротация UUID на всех Exit Nodes по SSH параллельно с Entry Node (меню: `CL`)
+- **Атомарное применение конфига** — модуль `xray_safe_apply` добавляет smoke-test поверх существующего `_xray_safe_apply_config` (backup + xray -test + rollback)
+- Архитектура **«один файл → одна ответственность»**: все новые функции в `vless_installer/modules/`
+- `nginx-watchdog.timer` добавлен в `_repair_timer` процедуру аварийного восстановления
+
+### Исправлено
+- Все ссылки в документации приведены к корректному репозиторию `inferno1978/VLESS-Ultimate-Installer` (ветка `main`)
+- `bootstrap.sh`: исправлены `REPO_URL`, `BRANCH`, имя директории архива при fallback-загрузке
+- `verify.py`: исправлены URL репозитория и ветка `master` → `main`
+
 # Changelog
 
 ## v4.10 (2025-05-19)

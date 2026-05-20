@@ -58,6 +58,22 @@ from datetime import datetime, timezone
 from typing import Any
 import getpass
 
+# ── Модули v4.11 ──────────────────────────────────────────────────────────────
+from vless_installer.modules.smoke_test      import smoke_test_xray
+from vless_installer.modules.xray_safe_apply import xray_apply_with_smoke
+from vless_installer.modules.nginx_watchdog  import (
+    nginx_watchdog_install, nginx_watchdog_remove, do_manage_nginx_watchdog,
+)
+from vless_installer.modules.ipset_persist   import (
+    ipset_save, ipset_restore_unit_install, ipset_restore_unit_remove,
+    do_manage_ipset_persist,
+)
+from vless_installer.modules.ripe_file_age   import (
+    check_ripe_file_age, ripe_file_age_banner,
+)
+from vless_installer.modules.cluster_ops import do_cluster_menu, load_exit_nodes
+# ─────────────────────────────────────────────────────────────────────────────
+
 
 def _set_config_owner(path) -> None:
     """
@@ -151,7 +167,7 @@ def die(msg: str) -> None:
     sys.exit(1)
 
 
-log_to_file("INFO", "=== Запуск VLESS Ultimate Installer v4.10 ===")
+log_to_file("INFO", "=== Запуск VLESS Ultimate Installer v4.11 ===")
 log_to_file("INFO", f"Время начала: {datetime.now()}")
 
 # =============================================================================
@@ -5911,7 +5927,7 @@ def install_dnscrypt() -> None:
     DNSCRYPT_CONF_DIR.mkdir(parents=True, exist_ok=True)
 
     DNSCRYPT_CONF.write_text(textwrap.dedent(f"""\
-        ## dnscrypt-proxy.toml — сгенерирован VLESS Ultimate Installer v4.10
+        ## dnscrypt-proxy.toml — сгенерирован VLESS Ultimate Installer v4.11
         ## Слушает на {DNSCRYPT_LISTEN_ADDR}:{DNSCRYPT_LISTEN_PORT}
 
         listen_addresses = ['{DNSCRYPT_LISTEN_ADDR}:{DNSCRYPT_LISTEN_PORT}']
@@ -24893,6 +24909,7 @@ def _ru_subnets_apply_to_xray(cidrs: list) -> bool:
         return False
     success(f"Xray перезапущен — {len(cidrs)} РФ подсетей → direct")
     _nginx_restart_if_reality()
+    smoke_test_xray()
     return True
 
 
@@ -25549,6 +25566,7 @@ def _as_direct_apply_to_xray(asn: str, cidrs: list, action: str = "direct") -> b
         action_label = {"direct": "direct", "proxy": "proxy (VPN)", "block": "BLOCK"}[action]
         success(f"Xray перезапущен -- {asn}: {len(cidrs_v4)} IPv4 + {len(cidrs_v6)} IPv6 -> {action_label}")
         _nginx_restart_if_reality()
+        smoke_test_xray()
         return True
     else:
         warn("  Xray не запустился за 90 сек — проверьте: journalctl -u xray -n 30")
@@ -29148,6 +29166,7 @@ def do_emergency_repair() -> None:
             _box_ok(f"{label}: активен")
 
     _repair_timer("xray-watchdog.timer",    "Watchdog")
+    _repair_timer("nginx-watchdog.timer",   "nginx Watchdog")
     _repair_timer("xray-autoupdate.timer",  "Autoupdate Xray-core")
     _repair_timer("xray-geo-update.timer",  "Geo-update (systemd)")
     _repair_timer("xray-ru-subnets.timer",  "РФ-подсети")
@@ -30427,7 +30446,7 @@ def do_manage_logrotate() -> None:
             _LOGROTATE_XRAY.parent.mkdir(parents=True, exist_ok=True)
             _LOGROTATE_XRAY.write_text(textwrap.dedent(f"""\
                 # Ротация логов Xray-core
-                # Создано VLESS Ultimate Installer v4.10
+                # Создано VLESS Ultimate Installer v4.11
                 /var/log/xray/access.log
                 /var/log/xray/error.log {{
                     {freq}
@@ -30808,9 +30827,12 @@ def _menu_security() -> None:
         _box_sep()
         _box_item("6", f"📡 Failover статус exit-нод{_awg_na}")
         _box_item("7", f"🔀 Авто-фолбэк в Режим A{_awg_na7}")
-        _box_item("8", "🐕 Watchdog авторестарт Xray")
-        _box_item("W", f"🔌 AWG Tunnel Watchdog  {DIM}(ip rule fallback при падении awg0){NC}")
-        _box_item("N", f"🌐 AWG Multi-Node  {DIM}(ноды, failover, SSH-защита){NC}")
+        _box_item("8",  "🐕 Watchdog авторестарт Xray")
+        _box_item("NW", f"🔁 nginx Watchdog  {DIM}(перезапуск nginx при падении){NC}")
+        _box_item("W",  f"🔌 AWG Tunnel Watchdog  {DIM}(ip rule fallback при падении awg0){NC}")
+        _box_item("N",  f"🌐 AWG Multi-Node  {DIM}(ноды, failover, SSH-защита){NC}")
+        _box_item("IP", f"📦 ipset Persist  {DIM}(восстановление ipset при reboot){NC}")
+        _box_item("CL", f"🖧  Кластер Exit Nodes  {DIM}(управление всеми Exit Nodes по SSH){NC}")
         _box_item("9", f"🔒 Мониторинг certbot renew  {DIM}(алерт при истечении){NC}")
         _box_item("H", f"🔒 SSH Hardening  {DIM}(порт / ключи / AllowUsers){NC}")
         _box_sep()
@@ -30850,8 +30872,14 @@ def _menu_security() -> None:
             do_manage_auto_fallback()
         elif ch == "8":
             do_manage_watchdog()
+        elif ch.lower() == "nw":
+            do_manage_nginx_watchdog()
         elif ch.lower() == "w":
             do_manage_awg_watchdog()
+        elif ch.lower() == "ip":
+            do_manage_ipset_persist()
+        elif ch.lower() == "cl":
+            do_cluster_menu()
         elif ch.lower() == "n":
             # === PATCH v2: AWG Multi-Node Management ===
             do_manage_awg_nodes()
@@ -31035,7 +31063,7 @@ def main_menu() -> None:
             _BOX_W_saved = _BOX_W
             _BOX_W = 64
             _box_top()
-            _box_row(f"  {BOLD}{TITLE}VLESS Ultimate Installer v4.10{NC}  {DIM}│{NC}  {mode_str}")
+            _box_row(f"  {BOLD}{TITLE}VLESS Ultimate Installer v4.11{NC}  {DIM}│{NC}  {mode_str}")
             _box_sep()
             _box_row()
             _box_row(f"  {CYAN}1{NC}  ⚙️  {TITLE}Установка и Система{NC}")
@@ -35098,6 +35126,9 @@ def _ingress_enable(port: int) -> None:
         warn("iptables не найден — невозможно применить правила")
         return
 
+    # Проверяем возраст RIPE-файла перед apply
+    if not check_ripe_file_age(interactive=True):
+        return
     v4, v6 = _ingress_get_cidrs()
     if not v4:
         warn("Список РФ подсетей пуст — проверьте доступность RIPE NCC")
@@ -35107,6 +35138,8 @@ def _ingress_enable(port: int) -> None:
     if use_ipset:
         ok = _ingress_apply_ipset(port, v4, v6)
         method = "ipset"
+        if ok:
+            ipset_save()  # persist ipset для boot-restore
     else:
         warn("ipset не установлен — используем plain iptables (медленнее)")
         warn("Рекомендуется: apt install ipset")
@@ -35138,6 +35171,8 @@ def _ingress_enable(port: int) -> None:
 
     # Устанавливаем cron для автообновления (еженедельно по воскресеньям в 03:00)
     _ingress_install_cron(port)
+    # Устанавливаем systemd-юнит восстановления ipset при reboot
+    ipset_restore_unit_install()
 
     log_to_file("INFO",
         f"Ingress GeoIP block enabled: port={port}, "
@@ -35211,6 +35246,7 @@ def do_manage_ingress_geoip() -> None:
             _box_row(f"  Обновлено:{CYAN} {updated or '—'}{NC}")
             _box_row(f"  Cron:     "
                      f"{''+GREEN+'вс 03:00'+NC if cron_ok else ''+YELLOW+'отключён'+NC}")
+            _box_row(f"  {ripe_file_age_banner()}")
         else:
             _box_row(f"  Статус:   {YELLOW}ОТКЛЮЧЕНО{NC}")
             _box_row(f"  Порт Entry Node: {CYAN}{cur_port}{NC}")
