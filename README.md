@@ -1,4 +1,4 @@
-# VLESS Ultimate Installer v4.11
+# VLESS Ultimate Installer v4.11.1
 
 [![Version](https://img.shields.io/badge/version-4.11.1-blue.svg)](https://github.com/inferno1978/VLESS-Ultimate-Installer)
 [![Python](https://img.shields.io/badge/python-3.10%2B-green.svg)](https://python.org)
