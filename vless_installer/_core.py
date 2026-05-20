@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# === v4.11 ===
+# === v4.11.1 ===
 """
 VLESS + TCP + REALITY + xHTTP TLS — Ultimate Installer v4.11.1
 Python 3.12+ port
@@ -58,7 +58,7 @@ from datetime import datetime, timezone
 from typing import Any
 import getpass
 
-# ── Модули v4.11 ──────────────────────────────────────────────────────────────
+# ── Модули v4.11.1 ──────────────────────────────────────────────────────────────
 from vless_installer.modules.smoke_test      import smoke_test_xray
 from vless_installer.modules.xray_safe_apply import xray_apply_with_smoke
 from vless_installer.modules.nginx_watchdog  import (
@@ -35827,7 +35827,7 @@ def do_manage_dns_rules() -> None:
 
 
 # =============================================================================
-#  МОДУЛЬ: HONEYPOT-ПОРТ  (v4.11)
+#  МОДУЛЬ: HONEYPOT-ПОРТ  (v4.11.1)
 #  Слушает TCP-порт через socat/netcat, каждого подключившегося сразу банит
 #  через UFW. Эффективная ловушка для сканеров портов и DPI-зондов.
 # =============================================================================
