@@ -88,32 +88,23 @@ XRAY_CONFIG_PATHS  = [
 ]
 XRAY_SERVICE_NAME  = "xray"
 
-# Подсети Telegram — все активные BGP-анонсы по данным bgp.he.net (май 2026)
-# Источник: AS62041, AS59930, AS44907, AS211157
-_TG_NETS = [
-    # ── AS62041 — основной блок (Europe / Americas) ───────────────────────────
-    "91.108.4.0/22",     # DC1/DC3 Miami
-    "91.108.8.0/22",     # DC2/DC4 Amsterdam
-    "91.108.56.0/22",    # DC5 Singapore
-    "95.161.64.0/20",    # российский диапазон (4096 адресов)
-    "149.154.160.0/22",  # DC (Amsterdam) — реальный BGP-анонс /22
-    "149.154.162.0/23",  # DC (Amsterdam) — суб-анонс внутри /22
-    "149.154.164.0/22",  # DC2/DC4 Amsterdam
-    "149.154.166.0/23",  # DC — суб-анонс внутри /22
-    # ── AS59930 — Americas ────────────────────────────────────────────────────
-    "91.108.12.0/22",    # DC
-    "149.154.172.0/22",  # DC
-    # ── AS44907 — CDN India / Singapore ──────────────────────────────────────
-    "91.108.20.0/22",    # CDN (India/SG)
-    # ── AS211157 — новый ASN (2021), Европа / Россия ─────────────────────────
-    "91.105.192.0/23",   # 512 адресов
-    "185.76.151.0/24",   # 256 адресов
-    # ── IPv6 ──────────────────────────────────────────────────────────────────
-    "2001:67c:4e8::/48",   # AS62041
-    "2001:b28:f23d::/48",  # AS59930
-    "2001:b28:f23c::/48",  # AS44907
-    "2a0a:f280:203::/48",  # AS211157
-]
+# Подсети Telegram — загружаются динамически из tg_nets.py
+# Встроенный список (fallback) обновлён: добавлен AS42065 109.239.140.0/24
+# Для обновления используйте меню Telemt → "Обновить подсети Telegram"
+from vless_installer.modules.tg_nets import (
+    get_tg_nets          as _get_tg_nets,
+    update_tg_nets_interactive as _update_tg_nets_interactive,
+    tg_nets_status_line  as _tg_nets_status_line,
+)
+
+def _TG_NETS_current() -> list:
+    """Возвращает актуальный список подсетей TG (файл → встроенный)."""
+    return _get_tg_nets()
+
+# Для обратной совместимости с кодом, который обращается к _TG_NETS напрямую.
+# Вычисляется один раз при импорте; для применения свежих данных используйте
+# _TG_NETS_current() внутри функций, работающих с iptables.
+_TG_NETS = _TG_NETS_current()
 
 # ══════════════════════════════════════════════════════════════════════════════
 #  BOX-РЕНДЕРИНГ
@@ -729,7 +720,8 @@ def xray_enable_tproxy_for_telemt(port: int = XRAY_TPROXY_PORT) -> tuple:
         _run(["systemctl", "restart", XRAY_SERVICE_NAME])
 
     # ── iptables REDIRECT ─────────────────────────────────────────────────────
-    failed = [net for net in _TG_NETS if not _ipt_add_redirect(net, port)]
+    tg_nets = _TG_NETS_current()
+    failed = [net for net in tg_nets if not _ipt_add_redirect(net, port)]
     _iptables_persist()
 
     if failed:
@@ -739,7 +731,7 @@ def xray_enable_tproxy_for_telemt(port: int = XRAY_TPROXY_PORT) -> tuple:
     status = "уже был настроен" if (existing_port and not xray_changed) else "добавлен"
     return True, (
         f"dokodemo-door {status} (:{port}), "
-        f"iptables REDIRECT активен [{len(_TG_NETS)} подсетей], "
+        f"iptables REDIRECT активен [{len(tg_nets)} подсетей], "
         f"транспорт: {mode_label}"
     )
 
@@ -766,7 +758,7 @@ def xray_disable_tproxy_for_telemt() -> tuple:
     else:
         port = XRAY_TPROXY_PORT
 
-    for net in _TG_NETS:
+    for net in _TG_NETS_current():
         _ipt_del_redirect(net, port or XRAY_TPROXY_PORT)
 
     _iptables_persist()
@@ -793,7 +785,8 @@ def _xray_tproxy_status() -> dict:
     cfg_path = _xray_config_path()
     cascade  = _xray_cascade_mode()
     base     = {"enabled": False, "port": 0, "cascade": cascade,
-                "proxy_tag": "—", "ipt_ok": False, "ipt_count": 0}
+                "proxy_tag": "—", "ipt_ok": False, "ipt_count": 0,
+                "ipt_total": len(_TG_NETS_current())}
     if not cfg_path:
         return base
     try:
@@ -807,15 +800,17 @@ def _xray_tproxy_status() -> dict:
 
     pt, is_bal   = _xray_get_proxy_tag(cfg)
     proxy_tag    = pt + (" [balancer]" if is_bal else "")
-    ipt_active   = sum(1 for n in _TG_NETS if _ipt_rule_exists(n, port))
+    tg_nets      = _TG_NETS_current()
+    ipt_active   = sum(1 for n in tg_nets if _ipt_rule_exists(n, port))
 
     return {
         "enabled":   True,
         "port":      port,
         "cascade":   cascade,
         "proxy_tag": proxy_tag,
-        "ipt_ok":    ipt_active == len(_TG_NETS),
+        "ipt_ok":    ipt_active == len(tg_nets),
         "ipt_count": ipt_active,
+        "ipt_total": len(tg_nets),
     }
 
 
@@ -1301,7 +1296,7 @@ def _run_install_inner(server_ip: str, server_ipv6: str) -> None:
         _box_ok(f"Обнаружен xray-каскад: {_cascade_label}")
         _box_info(f"Схема: Telemt → iptables REDIRECT → dokodemo :{XRAY_TPROXY_PORT} → xray → exit VPS → Telegram")
         if _tproxy_already:
-            ipt_str = f"{_xs['ipt_count']}/{len(_TG_NETS)} подсетей"
+            ipt_str = f"{_xs['ipt_count']}/{_xs.get('ipt_total', len(_TG_NETS_current()))} подсетей"
             _box_ok(f"tproxy уже настроен (порт {_xs['port']}, iptables: {ipt_str})")
         _box_row()
         _box_item("Y", f"Направить трафик Telemt через xray ({_cascade_label})  ✓ рекомендуется")
@@ -1464,7 +1459,7 @@ def _menu_xray_integration() -> None:
         _box_kv("Proxy tag:", xs["proxy_tag"])
 
         if enabled:
-            ipt_str = f"{xs['ipt_count']}/{len(_TG_NETS)}"
+            ipt_str = f"{xs['ipt_count']}/{xs.get('ipt_total', len(_TG_NETS_current()))}"
             ipt_col = GREEN if xs["ipt_ok"] else YELLOW
             _box_kv("dokodemo:", f"{GREEN}✓ активен  →  :{xs['port']}{NC}")
             _box_kv("iptables:", f"{ipt_col}REDIRECT {ipt_str} подсетей{NC}")
@@ -1478,6 +1473,9 @@ def _menu_xray_integration() -> None:
             _box_row()
             _box_warn("Telegram недоступен с российских IP без интеграции с xray!")
 
+        # Статус подсетей TG
+        _box_kv("Подсети:", _tg_nets_status_line())
+
         _box_row(); _box_sep()
         if not enabled:
             _box_item("1", f"✅  Включить интеграцию (dokodemo :{XRAY_TPROXY_PORT} + iptables)")
@@ -1485,6 +1483,7 @@ def _menu_xray_integration() -> None:
             _box_item("1", f"🔄  Переприменить / восстановить правила")
             _box_item("2", f"❌  Отключить интеграцию (перейти на direct)")
         _box_item("3", "🔍  Проверить статус xray inbound + iptables")
+        _box_item("N", "🌐  Обновить подсети Telegram + переприменить iptables")
         _box_sep()
         _box_item("Q", "← Назад"); _box_bot(); print()
 
@@ -1540,25 +1539,40 @@ def _menu_xray_integration() -> None:
                     _ok(f"xray сервис: {svc}") if svc == "active" else _warn(f"xray сервис: {svc}")
                     # iptables
                     port = _xray_dokodemo_port(cfg) or XRAY_TPROXY_PORT
-                    active = sum(1 for n in _TG_NETS if _ipt_rule_exists(n, port))
-                    total  = len(_TG_NETS)
+                    tg_nets_now = _TG_NETS_current()
+                    active = sum(1 for n in tg_nets_now if _ipt_rule_exists(n, port))
+                    total  = len(tg_nets_now)
                     col    = GREEN if active == total else YELLOW
                     _ok(f"iptables REDIRECT: {col}{active}/{total} подсетей{NC}")
                     if active < total:
-                        missing = [n for n in _TG_NETS if not _ipt_rule_exists(n, port)]
+                        missing = [n for n in tg_nets_now if not _ipt_rule_exists(n, port)]
                         for n in missing:
                             _warn(f"  отсутствует: {n}")
                 except Exception as e:
                     _err(f"Ошибка: {e}")
             _pause()
 
+        elif ch == "n":
+            # ── Обновление подсетей + переприменение iptables ─────────────
+            print()
+            new_nets = _update_tg_nets_interactive()
+            xs_now = _xray_tproxy_status()
+            if xs_now["enabled"]:
+                port = xs_now["port"]
+                print()
+                _info(f"Переприменяю iptables REDIRECT для {len(new_nets)} подсетей → :{port}...")
+                failed = [n for n in new_nets if not _ipt_add_redirect(n, port)]
+                _iptables_persist()
+                if failed:
+                    _warn(f"Не удалось добавить {len(failed)} правил")
+                else:
+                    _ok(f"iptables REDIRECT обновлён: {len(new_nets)} подсетей активны")
+            else:
+                _info("tproxy не активен — только файл обновлён.")
+            _pause()
+
         elif ch in ("q", ""):
             break
-
-
-# ══════════════════════════════════════════════════════════════════════════════
-#  ГЛАВНОЕ МЕНЮ MTProxy  ←  точка входа из _core.py
-# ══════════════════════════════════════════════════════════════════════════════
 def mtproto_menu() -> None:
     """
     Точка входа из _core.py → главное меню VLESS Ultimate → пункт 6.
@@ -1584,13 +1598,16 @@ def mtproto_menu() -> None:
         _xs  = _xray_tproxy_status()
         if _xs["enabled"]:
             _mode  = "AWG 2.0" if _xs["cascade"] == "awg" else "VLESS"
-            ipt_s  = f"{_xs['ipt_count']}/{len(_TG_NETS)}"
+            ipt_s  = f"{_xs['ipt_count']}/{_xs.get('ipt_total', len(_TG_NETS_current()))}"
             ipt_c  = GREEN if _xs["ipt_ok"] else YELLOW
             _box_kv("Xray:", f"{GREEN}dokodemo :{_xs['port']} → {_mode}{NC}  iptables {ipt_c}{ipt_s}{NC}")
         elif _xs["cascade"] != "none":
             _box_kv("Xray:", f"{YELLOW}каскад есть, tproxy не настроен{NC}")
         else:
             _box_kv("Xray:", f"{RED}каскад не обнаружен (direct){NC}")
+
+        # Статус подсетей Telegram
+        _box_kv("Подсети:", _tg_nets_status_line())
 
         _box_row(); _box_sep()
         _box_item("1", "🚀  Установить / переустановить")
@@ -1601,6 +1618,7 @@ def mtproto_menu() -> None:
         _box_item("6", "📊  Статистика трафика")
         _box_item("7", "📋  Статус / логи")
         _box_item("X", "🔗  Xray-интеграция (SOCKS5 ↔ каскад)")
+        _box_item("N", "🌐  Обновить подсети Telegram (RIPE/BGPView)")
         _box_item("8", f"{RED}🗑️   Полное удаление{NC}")
         _box_sep()
         _box_item("Q", "← Назад в главное меню VLESS")
@@ -1692,6 +1710,43 @@ def mtproto_menu() -> None:
                 _menu_xray_integration()
             except _Cancelled:
                 pass
+
+        elif ch == "n":
+            # ── Обновление подсетей Telegram ──────────────────────────────
+            _banner()
+            _box_top("🌐  ОБНОВЛЕНИЕ ПОДСЕТЕЙ TELEGRAM")
+            _box_row()
+            _box_info("Источники: RIPE NCC stat.ripe.net + BGPView API")
+            _box_info("ASN: AS62041, AS59930, AS44907, AS211157, AS42065")
+            _box_row()
+            _box_info("После обновления новые правила будут применены к iptables.")
+            _box_row()
+            _box_item("Y", "Обновить и применить")
+            _box_item("N", "← Отмена")
+            _box_bot(); print()
+            try:
+                ans = _ask(f"{CYAN}Выбор [Y/n]: {NC}", default="y", c=True).strip().lower()
+            except _Cancelled:
+                continue
+            if ans not in ("y", ""):
+                continue
+            print()
+            new_nets = _update_tg_nets_interactive()
+            # Применяем к iptables если tproxy активен
+            xs = _xray_tproxy_status()
+            if xs["enabled"]:
+                port = xs["port"]
+                print()
+                _info(f"Применяю iptables REDIRECT для {len(new_nets)} подсетей → :{port}...")
+                failed = [n for n in new_nets if not _ipt_add_redirect(n, port)]
+                _iptables_persist()
+                if failed:
+                    _warn(f"Не удалось добавить {len(failed)} правил: {', '.join(failed[:3])}{'…' if len(failed)>3 else ''}")
+                else:
+                    _ok(f"iptables REDIRECT обновлён: {len(new_nets)} подсетей")
+            else:
+                _info("tproxy не активен — iptables не обновляем.")
+            _pause()
 
         elif ch in ("q", ""):
             break

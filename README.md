@@ -48,7 +48,8 @@ bash bootstrap.sh
 | **Диагностика**  | Health Check, MTU Tracepath, Speed Test, TLS Cert Check              |
 | **Интеграции**   | Telegram-уведомления, Clash Meta / Sing-box конфиги                  |
 | **Обслуживание** | Авторестарт, автообновление xray/geo, миграция конфигов              |
-| **v4.11 NEW**    | Smoke-test, nginx Watchdog, ipset Persist, кластерное управление     |
+| **v4.11.1**        | Smoke-test, nginx Watchdog `[NW]`, ipset Persist `[IP]`, Кластер `[CL]` |
+| **v4.11.2 NEW** 🔥 | Telemt MTProto на entry-ноде → xray-каскад → Telegram (VLESS / AWG 2.0) |
 
 ## 📋 Требования
 
@@ -86,14 +87,14 @@ VLESS-Ultimate-Installer/
     ├── __init__.py
     ├── _core.py                 # Основной код установщика (~37 000 строк)
     └── modules/
-        ├── mtproto.py           # MTProto-прокси
+        ├── mtproto.py           # MTProto-прокси [v4.11.2: xray-каскад интеграция]
         ├── mtproto_stats.py     # Статистика MTProto
-        ├── smoke_test.py        # [v4.11] Автодиагностика после apply
-        ├── xray_safe_apply.py   # [v4.11] Атомарное применение конфига
-        ├── nginx_watchdog.py    # [v4.11] Watchdog для nginx
-        ├── ipset_persist.py     # [v4.11] Persistent ipset при reboot
-        ├── ripe_file_age.py     # [v4.11] Проверка возраста RIPE-файла
-        └── cluster_ops.py      # [v4.11] Управление кластером Exit Nodes
+        ├── smoke_test.py        # [v4.11.2] Автодиагностика после apply
+        ├── xray_safe_apply.py   # [v4.11.2] Атомарное применение конфига
+        ├── nginx_watchdog.py    # [v4.11.2] Watchdog для nginx [NW]
+        ├── ipset_persist.py     # [v4.11.2] Persistent ipset при reboot [IP]
+        ├── ripe_file_age.py     # [v4.11.2] Проверка возраста RIPE-файла
+        └── cluster_ops.py      # [v4.11.2] Управление кластером Exit Nodes [CL]
 ```
 
 ## 🏗️ Архитектура
@@ -116,7 +117,7 @@ VLESS-Ultimate-Installer/
 
 ```
                               ┌──► Exit VPS 1 (EU) ──►┐
-Клиент ──► Entry VPS (RU) ───-┼──► Exit VPS 2 (US) ──►├──► Интернет
+Клиент ──► Entry VPS (RU) ───┼──► Exit VPS 2 (US) ──►├──► Интернет
                               └──► Exit VPS 3 (AS) ──►┘
 ```
 
@@ -128,7 +129,7 @@ VLESS-Ultimate-Installer/
 │                                                             │
 │  bootstrap.sh ──► main.py ──exec──► _core.py                │
 │                                         │                   │
-│                               modules/ (v4.11)              │
+│                               modules/ (v4.11.2)              │
 │                                         │                   │
 │         Xray-core              Nginx (TLS)                  │
 │         /etc/xray/             /etc/nginx/                  │
@@ -151,6 +152,28 @@ VLESS-Ultimate-Installer/
 | **ipset + iptables** | Ingress-блокировка РФ подсетей (опционально)    |
 | **Certbot**          | TLS-сертификаты Let's Encrypt (xHTTP режим)     |
 
+### Telemt MTProto — интеграция с xray-каскадом `[v4.11.2]`
+
+Для entry-нод в России: Telemt принимает клиентов по MTProto,
+трафик перехватывается через `iptables REDIRECT` и направляется
+в `dokodemo-door` inbound xray, затем уходит через каскад на exit VPS.
+
+```
+Клиент (Telegram)
+    │  tg://proxy?server=ENTRY_IP...
+    ▼
+Telemt (entry VPS / RU)  — type = "direct"
+    │  iptables REDIRECT  →  127.0.0.1:10811
+    ▼
+Xray dokodemo-door  (tag: tproxy-telemt)
+    │  routing: inboundTag → balancerTag / outboundTag
+    ▼
+┌─ VLESS+REALITY:  chain-exit[-1] → exit VPS
+└─ AWG 2.0:        fwmark → awg0  → exit VPS
+    ▼
+Серверы Telegram ✓
+```
+
 ### Хранение состояния
 
 ```
@@ -165,11 +188,11 @@ VLESS-Ultimate-Installer/
 ├── ingress_geoip.json       # Состояние ingress-блокировки
 └── backups/                 # Резервные копии конфигов
 
-/etc/ipset.conf              # [v4.11] Дамп ipset для восстановления при reboot
+/etc/ipset.conf              # [v4.11.2] Дамп ipset для восстановления при reboot
 /var/log/
 ├── vless-install.log        # Лог установщика
-├── nginx-watchdog.log       # [v4.11] Лог nginx watchdog
-└── xray-ipset-restore.log   # [v4.11] Лог восстановления ipset
+├── nginx-watchdog.log       # [v4.11.2] Лог nginx watchdog
+└── xray-ipset-restore.log   # [v4.11.2] Лог восстановления ipset
 ```
 
 ## 🖥️ Управление сервисами
@@ -199,6 +222,27 @@ sudo python3 /opt/vless-ultimate/main.py --pinned-fallback-check
 sudo python3 /opt/vless-ultimate/main.py --tg-event EVENT MSG
 sudo python3 /opt/vless-ultimate/main.py --clear-asn-cache
 ```
+
+## 🔗 Кластерное управление `[CL]`
+
+Меню **Безопасность и Автоматизация → `[CL]`** позволяет управлять всеми
+Exit Nodes из Entry Node одной командой по SSH.
+
+| Пункт | Действие |
+|-------|----------|
+| `1` | Диагностика всех нод (статус + xray -test) |
+| `2` | Перезапуск Xray на всех нодах |
+| `3` | Обновление Xray-core на всех нодах |
+| `4` | Ротация UUID на всех нодах |
+| `5` | Произвольная команда на всех нодах |
+| `6` | Проверить SSH-доступ к нодам |
+| `P` | Задать / сменить пароль SSH-сессии |
+
+**Аутентификация:** сначала пробуется SSH-ключ (`~/.ssh/id_ed25519` и др.),
+при неудаче — запрашивается пароль root (один раз за сессию через `sshpass`).
+
+> **Зависимость:** для парольной аутентификации требуется `sshpass`
+> (`apt install sshpass`). При первом использовании устанавливается автоматически.
 
 ## 🔍 Диагностика
 
