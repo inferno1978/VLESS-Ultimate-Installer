@@ -1,6 +1,6 @@
-# VLESS Ultimate Installer v4.11.2
+# VLESS Ultimate Installer v4.11.3
 
-[![Version](https://img.shields.io/badge/version-4.11.2-blue.svg)](https://github.com/inferno1978/VLESS-Ultimate-Installer)
+[![Version](https://img.shields.io/badge/version-4.11.3-blue.svg)](https://github.com/inferno1978/VLESS-Ultimate-Installer)
 [![Python](https://img.shields.io/badge/python-3.10%2B-green.svg)](https://python.org)
 [![License](https://img.shields.io/badge/license-MIT-orange.svg)](https://github.com/inferno1978/VLESS-Ultimate-Installer/blob/main/LICENSE)
 [![Platform](https://img.shields.io/badge/platform-Ubuntu%20%7C%20Debian-lightgrey.svg)](https://ubuntu.com)
@@ -14,7 +14,7 @@
 ╚██╗ ██╔╝██║     ██╔══╝  ╚════██║╚════██║
  ╚████╔╝ ███████╗███████╗███████║███████║
   ╚═══╝  ╚══════╝╚══════╝╚══════╝╚══════╝
-  Ultimate Installer v4.11.2
+  Ultimate Installer v4.11.3
 ```
 
 ## ⚡ Быстрый старт
@@ -49,7 +49,8 @@ bash bootstrap.sh
 | **Интеграции**   | Telegram-уведомления, Clash Meta / Sing-box конфиги                  |
 | **Обслуживание** | Авторестарт, автообновление xray/geo, миграция конфигов              |
 | **v4.11.1**        | Smoke-test, nginx Watchdog `[NW]`, ipset Persist `[IP]`, Кластер `[CL]` |
-| **v4.11.2 NEW** 🔥 | Telemt MTProto на entry-ноде → xray-каскад → Telegram (VLESS / AWG 2.0) |
+| **v4.11.3 NEW** 🔥 | TCP whois вместо RIPE HTTP REST — все 4 источника подсетей TG работают с VPS |
+| **v4.11.2**        | Telemt MTProto на entry-ноде → xray-каскад → Telegram (VLESS / AWG 2.0) |
 
 ## 📋 Требования
 
@@ -89,6 +90,7 @@ VLESS-Ultimate-Installer/
     └── modules/
         ├── mtproto.py           # MTProto-прокси [v4.11.2: xray-каскад интеграция]
         ├── mtproto_stats.py     # Статистика MTProto
+        ├── tg_nets.py           # Подсети Telegram [v4.11.3: TCP whois, без HTTP]
         ├── smoke_test.py        # [v4.11.2] Автодиагностика после apply
         ├── xray_safe_apply.py   # [v4.11.2] Атомарное применение конфига
         ├── nginx_watchdog.py    # [v4.11.2] Watchdog для nginx [NW]
@@ -129,7 +131,7 @@ VLESS-Ultimate-Installer/
 │                                                             │
 │  bootstrap.sh ──► main.py ──exec──► _core.py                │
 │                                         │                   │
-│                               modules/ (v4.11.2)              │
+│                               modules/ (v4.11.3)              │
 │                                         │                   │
 │         Xray-core              Nginx (TLS)                  │
 │         /etc/xray/             /etc/nginx/                  │
