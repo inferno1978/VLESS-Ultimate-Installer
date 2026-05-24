@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-verify.py — Проверка целостности VLESS Ultimate Installer v4.11.2
+verify.py — Проверка целостности VLESS Ultimate Installer v4.11.3
 Запуск: python3 verify.py
 """
 import sys
@@ -212,7 +212,7 @@ if failed == 0:
     print(f"\n  Команды для публикации:")
     print(f"  {CYAN}git init{NC}")
     print(f"  {CYAN}git add .{NC}")
-    print(f"  {CYAN}git commit -m 'VLESS Ultimate Installer v4.11.2'{NC}")
+    print(f"  {CYAN}git commit -m 'VLESS Ultimate Installer v4.11.3'{NC}")
     print(f"  {CYAN}git remote add origin https://github.com/inferno1978/VLESS-Ultimate-Installer.git{NC}")
     print(f"  {CYAN}git push -u origin main{NC}")
 else:

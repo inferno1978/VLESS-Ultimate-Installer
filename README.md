@@ -1,6 +1,6 @@
-# VLESS Ultimate Installer v4.11.2
+# VLESS Ultimate Installer v4.11.3
 
-[![Version](https://img.shields.io/badge/version-4.11.2-blue.svg)](https://github.com/inferno1978/VLESS-Ultimate-Installer)
+[![Version](https://img.shields.io/badge/version-4.11.3-blue.svg)](https://github.com/inferno1978/VLESS-Ultimate-Installer)
 [![Python](https://img.shields.io/badge/python-3.10%2B-green.svg)](https://python.org)
 [![License](https://img.shields.io/badge/license-MIT-orange.svg)](https://github.com/inferno1978/VLESS-Ultimate-Installer/blob/main/LICENSE)
 [![Platform](https://img.shields.io/badge/platform-Ubuntu%20%7C%20Debian-lightgrey.svg)](https://ubuntu.com)
@@ -14,7 +14,7 @@
 ╚██╗ ██╔╝██║     ██╔══╝  ╚════██║╚════██║
  ╚████╔╝ ███████╗███████╗███████║███████║
   ╚═══╝  ╚══════╝╚══════╝╚══════╝╚══════╝
-  Ultimate Installer v4.11.2
+  Ultimate Installer v4.11.3
 ```
 
 ## ⚡ Быстрый старт
@@ -49,7 +49,7 @@ bash bootstrap.sh
 | **Интеграции**   | Telegram-уведомления, Clash Meta / Sing-box конфиги                  |
 | **Обслуживание** | Авторестарт, автообновление xray/geo, миграция конфигов              |
 | **v4.11.1**        | Smoke-test, nginx Watchdog `[NW]`, ipset Persist `[IP]`, Кластер `[CL]` |
-| **v4.11.2 NEW** 🔥 | Telemt MTProto на entry-ноде → xray-каскад → Telegram (VLESS / AWG 2.0) |
+| **v4.11.3 NEW** 🔥 | Telemt MTProto на entry-ноде → xray-каскад → Telegram (VLESS / AWG 2.0) |
 
 ## 📋 Требования
 
@@ -87,14 +87,14 @@ VLESS-Ultimate-Installer/
     ├── __init__.py
     ├── _core.py                 # Основной код установщика (~37 000 строк)
     └── modules/
-        ├── mtproto.py           # MTProto-прокси [v4.11.2: xray-каскад интеграция]
+        ├── mtproto.py           # MTProto-прокси [v4.11.3: xray-каскад интеграция]
         ├── mtproto_stats.py     # Статистика MTProto
-        ├── smoke_test.py        # [v4.11.2] Автодиагностика после apply
-        ├── xray_safe_apply.py   # [v4.11.2] Атомарное применение конфига
-        ├── nginx_watchdog.py    # [v4.11.2] Watchdog для nginx [NW]
-        ├── ipset_persist.py     # [v4.11.2] Persistent ipset при reboot [IP]
-        ├── ripe_file_age.py     # [v4.11.2] Проверка возраста RIPE-файла
-        └── cluster_ops.py      # [v4.11.2] Управление кластером Exit Nodes [CL]
+        ├── smoke_test.py        # [v4.11.3] Автодиагностика после apply
+        ├── xray_safe_apply.py   # [v4.11.3] Атомарное применение конфига
+        ├── nginx_watchdog.py    # [v4.11.3] Watchdog для nginx [NW]
+        ├── ipset_persist.py     # [v4.11.3] Persistent ipset при reboot [IP]
+        ├── ripe_file_age.py     # [v4.11.3] Проверка возраста RIPE-файла
+        └── cluster_ops.py      # [v4.11.3] Управление кластером Exit Nodes [CL]
 ```
 
 ## 🏗️ Архитектура
@@ -129,7 +129,7 @@ VLESS-Ultimate-Installer/
 │                                                             │
 │  bootstrap.sh ──► main.py ──exec──► _core.py                │
 │                                         │                   │
-│                               modules/ (v4.11.2)              │
+│                               modules/ (v4.11.3)              │
 │                                         │                   │
 │         Xray-core              Nginx (TLS)                  │
 │         /etc/xray/             /etc/nginx/                  │
@@ -152,7 +152,7 @@ VLESS-Ultimate-Installer/
 | **ipset + iptables** | Ingress-блокировка РФ подсетей (опционально)    |
 | **Certbot**          | TLS-сертификаты Let's Encrypt (xHTTP режим)     |
 
-### Telemt MTProto — интеграция с xray-каскадом `[v4.11.2]`
+### Telemt MTProto — интеграция с xray-каскадом `[v4.11.3]`
 
 Для entry-нод в России: Telemt принимает клиентов по MTProto,
 трафик перехватывается через `iptables REDIRECT` и направляется
@@ -188,11 +188,11 @@ Xray dokodemo-door  (tag: tproxy-telemt)
 ├── ingress_geoip.json       # Состояние ingress-блокировки
 └── backups/                 # Резервные копии конфигов
 
-/etc/ipset.conf              # [v4.11.2] Дамп ipset для восстановления при reboot
+/etc/ipset.conf              # [v4.11.3] Дамп ipset для восстановления при reboot
 /var/log/
 ├── vless-install.log        # Лог установщика
-├── nginx-watchdog.log       # [v4.11.2] Лог nginx watchdog
-└── xray-ipset-restore.log   # [v4.11.2] Лог восстановления ipset
+├── nginx-watchdog.log       # [v4.11.3] Лог nginx watchdog
+└── xray-ipset-restore.log   # [v4.11.3] Лог восстановления ipset
 ```
 
 ## 🖥️ Управление сервисами
