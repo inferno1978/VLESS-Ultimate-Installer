@@ -176,7 +176,7 @@ HTTP_TIMEOUT = 20
 
 TG_ASNS      = [62041, 59930, 44907, 211157, 42065, 62014]
 TG_MNT       = "MNT-TELEGRAM"
-_UA          = "VLESS-Ultimate-Installer/4.11 (telemt-tg-nets)"
+_UA          = "VLESS-Ultimate-Installer/4.11.3 (telemt-tg-nets)"
 
 # ══════════════════════════════════════════════════════════════════════════════
 #  ВСТРОЕННЫЙ FALLBACK (если все 4 источника недоступны)
@@ -353,31 +353,20 @@ def _src_ripe_stat(asns: list[int]) -> tuple[list[str], int, str]:
 # ══════════════════════════════════════════════════════════════════════════════
 #  ИСТОЧНИК 2: bgp.tools — парсинг страниц /as/XXXX (только Originated)
 #
-#  НЕ используем table.jsonl — он содержит Low Visibility префиксы
-#  (traffic-engineering /23 суб-анонсы и технические анонсы), которые
-#  страница bgp.tools/as/XXXX скрывает по умолчанию. Итог table.jsonl
-#  для 6 Telegram ASN = ~56 записей вместо корректных ~25.
-#
-#  Парсинг HTML страниц даёт только то что bgp.tools считает основными
-#  анонсами (Prefixes Originated без Low Visibility).
+#  Вырезаем строго блок между маркерами:
+#    "scraping this block" → конец таблицы перед "Upstreams"
+#  Это исключает секции Peers/Upstreams/Policy где тоже встречаются /prefix/ ссылки.
 # ══════════════════════════════════════════════════════════════════════════════
 def _src_bgptools(asns: list[int]) -> tuple[list[str], int, str]:
-    """
-    Получает originated-префиксы для каждого ASN через страницу bgp.tools/as/XXXX.
-    Парсит таблицу префиксов из HTML — только "Prefixes Originated" без Low Visibility.
-    """
-    # Паттерн для CIDR в href атрибутах таблицы префиксов
     _re_v4 = re.compile(r'/prefix/(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}/\d{1,2})')
-    _re_v6 = re.compile(r'/prefix/([0-9a-fA-F:]+/\d{1,3})')
+    _re_v6 = re.compile(r'/prefix/([0-9a-fA-F]*:[0-9a-fA-F:]+/\d{1,3})')
+    # Маркеры: таблица префиксов находится строго между ними
+    MARK_START = "scraping this block"
+    MARK_END   = "Upstreams"
 
     nets: list[str] = []
-    ok_count = 0
-    headers = {
-        "User-Agent": (
-            "VLESS-Ultimate bgp.tools - admin@example.com"
-        ),
-        "Accept": "text/html,application/xhtml+xml",
-    }
+    headers = {"User-Agent": "VLESS-Ultimate bgp.tools - admin@example.com",
+                "Accept": "text/html,application/xhtml+xml"}
 
     for asn in asns:
         url = f"https://bgp.tools/as/{asn}"
@@ -386,16 +375,14 @@ def _src_bgptools(asns: list[int]) -> tuple[list[str], int, str]:
             continue
         try:
             html = raw.decode("utf-8", errors="replace")
-            # Ищем секцию таблицы префиксов (до "Low Visibility" или конца)
-            # bgp.tools рендерит основные префиксы перед кнопкой Low Visibility
-            # Находим блок между "Prefixes Originated" и следующим крупным разделом
-            # Извлекаем все /prefix/CIDR ссылки
-            found_v4 = _re_v4.findall(html)
-            found_v6 = _re_v6.findall(html)
-            found = [n for n in found_v4 + found_v6 if _valid_cidr(n)]
-            if found:
-                nets += found
-                ok_count += len(found)
+            # Вырезаем только блок таблицы префиксов
+            s = html.find(MARK_START)
+            e = html.find(MARK_END, s) if s != -1 else -1
+            block = html[s:e] if s != -1 and e != -1 else ""
+            if not block:
+                continue
+            found = _re_v4.findall(block) + _re_v6.findall(block)
+            nets += [n for n in found if _valid_cidr(n)]
         except Exception:
             continue
 

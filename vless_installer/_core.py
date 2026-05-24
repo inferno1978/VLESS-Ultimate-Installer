@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
-# === v4.11.2 ===
+# === v4.11.3 ===
 """
-VLESS + TCP + REALITY + xHTTP TLS — Ultimate Installer v4.11.2
+VLESS + TCP + REALITY + xHTTP TLS — Ultimate Installer v4.11.3
 Python 3.12+ port
 
 Поддержка: Ubuntu 20.04/22.04/24.04, Debian 11/12/13
@@ -58,7 +58,7 @@ from datetime import datetime, timezone
 from typing import Any
 import getpass
 
-# ── Модули v4.11.2 ──────────────────────────────────────────────────────────────
+# ── Модули v4.11.3 ──────────────────────────────────────────────────────────────
 from vless_installer.modules.smoke_test      import smoke_test_xray
 from vless_installer.modules.xray_safe_apply import xray_apply_with_smoke
 from vless_installer.modules.nginx_watchdog  import (
@@ -167,7 +167,7 @@ def die(msg: str) -> None:
     sys.exit(1)
 
 
-log_to_file("INFO", "=== Запуск VLESS Ultimate Installer v4.11.2 ===")
+log_to_file("INFO", "=== Запуск VLESS Ultimate Installer v4.11.3 ===")
 log_to_file("INFO", f"Время начала: {datetime.now()}")
 
 # =============================================================================
@@ -194,7 +194,7 @@ def _make_banner() -> str:
         "  ╚═══╝  ╚══════╝╚══════╝╚══════╝╚══════╝",
     ]
     _info_lines = [
-        "VLESS REALITY + xHTTP TLS INSTALLER v4.11.2",
+        "VLESS REALITY + xHTTP TLS INSTALLER v4.11.3",
         "IPv6 DualStack | 6 Templates | SHA256 Verify",
         "Balancer: RoundRobin | LeastPing | LeastLoad",
         "Dashboard | FP Rotate | GeoCheck | Multi-User",
@@ -5927,7 +5927,7 @@ def install_dnscrypt() -> None:
     DNSCRYPT_CONF_DIR.mkdir(parents=True, exist_ok=True)
 
     DNSCRYPT_CONF.write_text(textwrap.dedent(f"""\
-        ## dnscrypt-proxy.toml — сгенерирован VLESS Ultimate Installer v4.11.2
+        ## dnscrypt-proxy.toml — сгенерирован VLESS Ultimate Installer v4.11.3
         ## Слушает на {DNSCRYPT_LISTEN_ADDR}:{DNSCRYPT_LISTEN_PORT}
 
         listen_addresses = ['{DNSCRYPT_LISTEN_ADDR}:{DNSCRYPT_LISTEN_PORT}']
@@ -25294,7 +25294,7 @@ def _fetch_prefixes_for_asn(asn: str) -> list:
         for attempt in range(1, 4):   # до 3 попыток на каждый URL
             try:
                 req = urllib.request.Request(url, headers={
-                    "User-Agent": "xray-installer/4.11.2",
+                    "User-Agent": "xray-installer/4.11.3",
                     "Accept":     "application/json",
                 })
                 with urllib.request.urlopen(req, timeout=30) as resp:
@@ -30446,7 +30446,7 @@ def do_manage_logrotate() -> None:
             _LOGROTATE_XRAY.parent.mkdir(parents=True, exist_ok=True)
             _LOGROTATE_XRAY.write_text(textwrap.dedent(f"""\
                 # Ротация логов Xray-core
-                # Создано VLESS Ultimate Installer v4.11.2
+                # Создано VLESS Ultimate Installer v4.11.3
                 /var/log/xray/access.log
                 /var/log/xray/error.log {{
                     {freq}
@@ -31060,7 +31060,7 @@ def main_menu() -> None:
             _BOX_W_saved = _BOX_W
             _BOX_W = 64
             _box_top()
-            _box_row(f"  {BOLD}{TITLE}VLESS Ultimate Installer v4.11.2{NC}  {DIM}│{NC}  {mode_str}")
+            _box_row(f"  {BOLD}{TITLE}VLESS Ultimate Installer v4.11.3{NC}  {DIM}│{NC}  {mode_str}")
             _box_sep()
             _box_row()
             _box_row(f"  {CYAN}1{NC}  ⚙️  {TITLE}Установка и Система{NC}")
@@ -35827,7 +35827,7 @@ def do_manage_dns_rules() -> None:
 
 
 # =============================================================================
-#  МОДУЛЬ: HONEYPOT-ПОРТ  (v4.11.2)
+#  МОДУЛЬ: HONEYPOT-ПОРТ  (v4.11.3)
 #  Слушает TCP-порт через socat/netcat, каждого подключившегося сразу банит
 #  через UFW. Эффективная ловушка для сканеров портов и DPI-зондов.
 # =============================================================================
