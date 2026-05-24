@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # ============================================================
-#  VLESS Ultimate Installer v4.11.2 — Bootstrap
+#  VLESS Ultimate Installer v4.11.3 — Bootstrap
 #  bash <(curl -fsSL https://raw.githubusercontent.com/inferno1978/VLESS-Ultimate-Installer/main/bootstrap.sh)
 # ============================================================
 set -euo pipefail
@@ -21,7 +21,7 @@ cat << 'BANNER'
  ╚██╗ ██╔╝██║     ██╔══╝  ╚════██║╚════██║
   ╚████╔╝ ███████╗███████╗███████║███████║
    ╚═══╝  ╚══════╝╚══════╝╚══════╝╚══════╝
-   Ultimate Installer v4.11.2
+   Ultimate Installer v4.11.3
 BANNER
 echo -e "${NC}"
 
@@ -67,38 +67,58 @@ if [[ "$PY_MIN_OK" != "1" ]]; then
 fi
 ok "Python ${PY_VER}: OK"
 
-# [4] Загрузка
+# [4] Загрузка / обновление
 echo -e "\n${BOLD}[4/5] Загрузка VLESS Ultimate${NC}"
 INSTALL_DIR="/opt/vless-ultimate"
 REPO_URL="https://github.com/inferno1978/VLESS-Ultimate-Installer"
 BRANCH="main"
 
 if [[ -d "${INSTALL_DIR}/.git" ]]; then
-    info "Обновление существующей установки..."
+    info "Обновление существующей git-установки..."
     cd "$INSTALL_DIR"
     git pull --quiet origin "$BRANCH" 2>/dev/null \
         && ok "Обновлено до последней версии" \
-        || warn "Не удалось обновить — используем текущую версию"
+        || warn "Не удалось обновить через git — принудительно обновляю файлы..."
+    # Принудительно обновляем ключевые модули напрямую с GitHub
+    _update_module() {
+        local rel_path="$1"
+        local url="https://raw.githubusercontent.com/inferno1978/VLESS-Ultimate-Installer/${BRANCH}/${rel_path}"
+        curl -fsSL --connect-timeout 15 -o "${INSTALL_DIR}/${rel_path}" "$url" 2>/dev/null \
+            && info "Обновлён: ${rel_path}" \
+            || warn "Не удалось обновить: ${rel_path}"
+    }
+    _update_module "vless_installer/modules/tg_nets.py"
 else
-    info "Клонирование репозитория..."
-    if ! git clone --quiet --depth 1 --branch "$BRANCH" "$REPO_URL" "$INSTALL_DIR" 2>/dev/null; then
-        warn "git clone не удался — загружаю архив..."
-        mkdir -p "$INSTALL_DIR"
+    if [[ -d "$INSTALL_DIR" ]] && [[ -f "${INSTALL_DIR}/main.py" ]]; then
+        # Установка без .git — принудительно обновляем все файлы с GitHub
+        info "Установка без git обнаружена — принудительное обновление файлов..."
         ARCHIVE="${REPO_URL}/archive/refs/heads/${BRANCH}.tar.gz"
-        ARCHIVE_TMP="/tmp/vless_ultimate.tar.gz"
+        ARCHIVE_TMP="/tmp/vless_ultimate_update.tar.gz"
         ARCHIVE_DIR="VLESS-Ultimate-Installer-${BRANCH}"
-        EXPECTED_SHA256="PLACEHOLDER_SHA256_UPDATE_BEFORE_RELEASE"
-
-        curl -fsSL --connect-timeout 30 --retry 3 -o "$ARCHIVE_TMP" "$ARCHIVE" || {
-            err "Не удалось загрузить архив. Проверьте соединение."
-            exit 1
-        }
-
-        tar -xzf "$ARCHIVE_TMP" -C /tmp/
-        cp -r "/tmp/${ARCHIVE_DIR}/." "$INSTALL_DIR/"
-        rm -rf "/tmp/${ARCHIVE_DIR}" "$ARCHIVE_TMP"
+        curl -fsSL --connect-timeout 30 --retry 3 -o "$ARCHIVE_TMP" "$ARCHIVE" && {
+            tar -xzf "$ARCHIVE_TMP" -C /tmp/
+            cp -rf "/tmp/${ARCHIVE_DIR}/." "$INSTALL_DIR/"
+            rm -rf "/tmp/${ARCHIVE_DIR}" "$ARCHIVE_TMP"
+            ok "Файлы обновлены до последней версии"
+        } || warn "Не удалось обновить — используем текущую версию"
+    else
+        info "Клонирование репозитория..."
+        if ! git clone --quiet --depth 1 --branch "$BRANCH" "$REPO_URL" "$INSTALL_DIR" 2>/dev/null; then
+            warn "git clone не удался — загружаю архив..."
+            mkdir -p "$INSTALL_DIR"
+            ARCHIVE="${REPO_URL}/archive/refs/heads/${BRANCH}.tar.gz"
+            ARCHIVE_TMP="/tmp/vless_ultimate.tar.gz"
+            ARCHIVE_DIR="VLESS-Ultimate-Installer-${BRANCH}"
+            curl -fsSL --connect-timeout 30 --retry 3 -o "$ARCHIVE_TMP" "$ARCHIVE" || {
+                err "Не удалось загрузить архив. Проверьте соединение."
+                exit 1
+            }
+            tar -xzf "$ARCHIVE_TMP" -C /tmp/
+            cp -r "/tmp/${ARCHIVE_DIR}/." "$INSTALL_DIR/"
+            rm -rf "/tmp/${ARCHIVE_DIR}" "$ARCHIVE_TMP"
+        fi
+        ok "Загружено в ${INSTALL_DIR}"
     fi
-    ok "Загружено в ${INSTALL_DIR}"
 fi
 
 [[ -f "${INSTALL_DIR}/main.py" ]] || { err "main.py не найден в ${INSTALL_DIR}"; exit 1; }
