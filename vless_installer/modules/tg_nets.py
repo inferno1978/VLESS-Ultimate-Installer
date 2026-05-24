@@ -482,7 +482,8 @@ def _src_ripe_whois_rest() -> tuple[list[str], int, str]:
 # ══════════════════════════════════════════════════════════════════════════════
 def fetch_tg_nets_from_sources(verbose: bool = True) -> tuple[list[str], list[str], dict]:
     """
-    Запрашивает все 4 источника параллельно.
+    Запрашивает RIPE NCC stat.ripe.net (announced-prefixes по ASN).
+    При недоступности источника использует builtin-список.
     Возвращает (nets_final, sources_used, stats_dict).
     """
     import threading
@@ -496,10 +497,7 @@ def fetch_tg_nets_from_sources(verbose: bool = True) -> tuple[list[str], list[st
             _results[name] = ([], 0, "ошибка")
 
     tasks = [
-        ("RIPE-stat",  _src_ripe_stat,      TG_ASNS),
-        ("bgp.tools",  _src_bgptools,        TG_ASNS),
-        ("RADB-IRR",   _src_radb_irr,        TG_ASNS),
-        ("RIPE-WHOIS", _src_ripe_whois_rest),
+        ("RIPE-stat",  _src_ripe_stat, TG_ASNS),
     ]
 
     # Запускаем потоки
@@ -528,14 +526,23 @@ def fetch_tg_nets_from_sources(verbose: bool = True) -> tuple[list[str], list[st
     # соседних AS. Принимаем только префиксы внутри известного IP-пространства
     # Telegram — это единственный надёжный способ исключить чужие подсети.
     _TG_SUPERNETS = [ipaddress.ip_network(n) for n in [
-        "91.108.0.0/16",        # AS62041, AS44907, AS62014, AS59930
-        "149.154.160.0/20",     # AS62041, AS59930, AS62014
+        # Точные блоки Telegram — суб-блоки принимаются, всё остальное отбрасывается
+        "91.108.4.0/22",        # AS62041
+        "91.108.8.0/22",        # AS62041
+        "91.108.12.0/22",       # AS59930
+        "91.108.16.0/22",       # AS62014
+        "91.108.20.0/22",       # AS44907
+        "91.108.56.0/22",       # AS62041
+        "149.154.160.0/22",     # AS62041
+        "149.154.164.0/22",     # AS62041
+        "149.154.168.0/22",     # AS62014
+        "149.154.172.0/22",     # AS59930
         "95.161.64.0/20",       # AS62041
         "91.105.192.0/23",      # AS211157
         "185.76.151.0/24",      # AS211157
         "109.239.140.0/24",     # AS42065
         "2001:67c:4e8::/48",    # AS62041
-        "2001:b28:f23c::/46",   # AS44907, AS59930, AS62014 (покрывает /48 блоки)
+        "2001:b28:f23c::/46",   # AS44907/AS59930/AS62014 (покрывает все /48 блоки)
         "2a0a:f280:203::/48",   # AS211157
     ]]
 
