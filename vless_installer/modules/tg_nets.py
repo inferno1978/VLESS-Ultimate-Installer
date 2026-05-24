@@ -334,7 +334,7 @@ def _src_ripe_stat(asns: list[int]) -> tuple[list[str], int, str]:
     ok_asns = 0
     for asn in asns:
         url = (f"https://stat.ripe.net/data/announced-prefixes/data.json"
-               f"?resource=AS{asn}&starttime=latest")
+               f"?resource=AS{asn}")
         raw = _http_get(url)
         if raw:
             try:
