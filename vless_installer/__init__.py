@@ -1,2 +1,2 @@
-"""VLESS Ultimate Installer v4.11.3"""
-__version__ = "4.11.3"
+"""VLESS Ultimate Installer v4.11.2"""
+__version__ = "4.11.2"

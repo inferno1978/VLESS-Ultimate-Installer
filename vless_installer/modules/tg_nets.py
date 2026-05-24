@@ -6,10 +6,11 @@ vless_installer/modules/tg_nets.py
 
 Источники (4 независимых канала, работают параллельно):
 
-  1. RIPE NCC whois.ripe.net TCP:43  — route/route6 по ASN (работает с VPS)
-  2. bgp.tools/table.jsonl   — дамп ~500 BGP-пиров (обновл. каждые 30 мин)
+  1. RIPE NCC stat.ripe.net  — live BGP-анонсы по ASN (announced-prefixes)
+  2. bgp.tools/as/XXXX       — HTML-парсинг страниц AS (только Originated,
+                               без Low Visibility префиксов)
   3. RADB / IRR whois TCP    — route-объекты + expand AS-TELEGRAM set
-  4. RIPE WHOIS TCP:43       — объекты с mnt-by: MNT-TELEGRAM (без HTTP)
+  4. RIPE WHOIS REST         — объекты с mnt-by: MNT-TELEGRAM
 
 ASN Telegram:
   AS62041  основной (Europe / Americas / Singapore)
@@ -325,100 +326,83 @@ def _http_get(url: str, timeout: int = HTTP_TIMEOUT) -> Optional[bytes]:
         return None
 
 # ══════════════════════════════════════════════════════════════════════════════
-#  ИСТОЧНИК 1: RIPE NCC — whois.ripe.net TCP:43
-#
-#  Замена stat.ripe.net (HTTP REST → 403 с datacenter/VPS IP).
-#  whois.ripe.net:43 не блокирует по IP и не требует API-ключа.
-#
-#  Запросы:
-#    -r -T route  -i origin ASxxxxx   → IPv4 route-объекты
-#    -r -T route6 -i origin ASxxxxx   → IPv6 route6-объекты
-#  Флаг -r отключает рекурсию (без него тянет referenced objects).
+#  ИСТОЧНИК 1: RIPE NCC stat.ripe.net
 # ══════════════════════════════════════════════════════════════════════════════
-def _whois_ripe_tcp(query: str, timeout: int = 15) -> Optional[str]:
-    """TCP:43 запрос к whois.ripe.net с принудительным IPv4."""
-    try:
-        addrs = socket.getaddrinfo(
-            "whois.ripe.net", 43, socket.AF_INET, socket.SOCK_STREAM
-        )
-        if not addrs:
-            return None
-        ip = addrs[0][4][0]
-        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        sock.settimeout(timeout)
-        sock.connect((ip, 43))
-        sock.sendall((query + "\r\n").encode("ascii"))
-        chunks = []
-        while True:
-            chunk = sock.recv(4096)
-            if not chunk:
-                break
-            chunks.append(chunk)
-        sock.close()
-        return b"".join(chunks).decode("utf-8", errors="replace")
-    except Exception:
-        return None
-
-
 def _src_ripe_stat(asns: list[int]) -> tuple[list[str], int, str]:
-    """
-    Источник 1: RIPE whois.ripe.net TCP:43 — route/route6 объекты по ASN.
-    Работает с VPS/datacenter IP (в отличие от stat.ripe.net HTTP API).
-    """
+    """Возвращает (nets, raw_count, status_msg)."""
     nets: list[str] = []
     ok_asns = 0
     for asn in asns:
-        found_this = []
-        for obj_type, flag in (("route", "-T route"), ("route6", "-T route6")):
-            resp = _whois_ripe_tcp(f"-r {flag} -i origin AS{asn}")
-            if not resp:
-                continue
-            for line in resp.splitlines():
-                line = line.strip()
-                if line.lower().startswith(obj_type + ":"):
-                    cidr = line.split(":", 1)[1].strip()
-                    # route6 может содержать описание после пробела
-                    cidr = cidr.split()[0] if cidr else ""
-                    if _valid_cidr(cidr):
-                        found_this.append(cidr)
-        if found_this:
-            nets += found_this
-            ok_asns += 1
+        url = (f"https://stat.ripe.net/data/announced-prefixes/data.json"
+               f"?resource=AS{asn}&starttime=latest")
+        raw = _http_get(url)
+        if raw:
+            try:
+                data = json.loads(raw)
+                found = [p["prefix"] for p in data.get("data", {}).get("prefixes", [])
+                         if _valid_cidr(p.get("prefix", ""))]
+                nets += found
+                if found:
+                    ok_asns += 1
+            except Exception:
+                pass
     if nets:
         return nets, len(nets), f"{len(nets)} префиксов ({ok_asns}/{len(asns)} ASN)"
     return [], 0, "недоступен"
 
 # ══════════════════════════════════════════════════════════════════════════════
-#  ИСТОЧНИК 2: bgp.tools/table.jsonl
+#  ИСТОЧНИК 2: bgp.tools — парсинг страниц /as/XXXX (только Originated)
+#
+#  НЕ используем table.jsonl — он содержит Low Visibility префиксы
+#  (traffic-engineering /23 суб-анонсы и технические анонсы), которые
+#  страница bgp.tools/as/XXXX скрывает по умолчанию. Итог table.jsonl
+#  для 6 Telegram ASN = ~56 записей вместо корректных ~25.
+#
+#  Парсинг HTML страниц даёт только то что bgp.tools считает основными
+#  анонсами (Prefixes Originated без Low Visibility).
 # ══════════════════════════════════════════════════════════════════════════════
 def _src_bgptools(asns: list[int]) -> tuple[list[str], int, str]:
-    asn_set = set(asns)
-    raw = _http_get("https://bgp.tools/table.jsonl", timeout=35)
-    if not raw:
-        return [], 0, "недоступен"
+    """
+    Получает originated-префиксы для каждого ASN через страницу bgp.tools/as/XXXX.
+    Парсит таблицу префиксов из HTML — только "Prefixes Originated" без Low Visibility.
+    """
+    # Паттерн для CIDR в href атрибутах таблицы префиксов
+    _re_v4 = re.compile(r'/prefix/(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}/\d{1,2})')
+    _re_v6 = re.compile(r'/prefix/([0-9a-fA-F:]+/\d{1,3})')
+
     nets: list[str] = []
-    try:
-        for line in raw.decode("utf-8", errors="replace").splitlines():
-            if not line.strip():
-                continue
-            try:
-                obj = json.loads(line)
-                if obj.get("ASN") in asn_set:
-                    cidr = obj.get("CIDR", "")
-                    hits = obj.get("Hits", 0)
-                    # hits >= 10: реальные широко-видимые анонсы.
-                    # More-specific /23 внутри /22 тоже пройдут (Telegram
-                    # анонсирует их через много пиров), но будут убраны
-                    # функцией _remove_more_specific после объединения.
-                    if _valid_cidr(cidr) and hits >= 10:
-                        nets.append(cidr)
-            except Exception:
-                continue
-    except Exception:
-        return [], 0, "ошибка парсинга"
+    ok_count = 0
+    headers = {
+        "User-Agent": (
+            "VLESS-Ultimate bgp.tools - admin@example.com"
+        ),
+        "Accept": "text/html,application/xhtml+xml",
+    }
+
+    for asn in asns:
+        url = f"https://bgp.tools/as/{asn}"
+        raw = _http_get(url, timeout=15)
+        if not raw:
+            continue
+        try:
+            html = raw.decode("utf-8", errors="replace")
+            # Ищем секцию таблицы префиксов (до "Low Visibility" или конца)
+            # bgp.tools рендерит основные префиксы перед кнопкой Low Visibility
+            # Находим блок между "Prefixes Originated" и следующим крупным разделом
+            # Извлекаем все /prefix/CIDR ссылки
+            found_v4 = _re_v4.findall(html)
+            found_v6 = _re_v6.findall(html)
+            found = [n for n in found_v4 + found_v6 if _valid_cidr(n)]
+            if found:
+                nets += found
+                ok_count += len(found)
+        except Exception:
+            continue
+
     if nets:
-        return nets, len(nets), f"{len(nets)} префиксов (hits≥10)"
-    return [], 0, "нет данных"
+        deduped = list(dict.fromkeys(nets))
+        return deduped, len(deduped), f"{len(deduped)} префиксов"
+    return [], 0, "недоступен"
 
 # ══════════════════════════════════════════════════════════════════════════════
 #  ИСТОЧНИК 3: RADB / IRR whois TCP:43
@@ -469,26 +453,29 @@ def _src_radb_irr(asns: list[int]) -> tuple[list[str], int, str]:
     return [], 0, "недоступен"
 
 # ══════════════════════════════════════════════════════════════════════════════
-#  ИСТОЧНИК 4: RIPE WHOIS TCP:43 — объекты по mnt-by MNT-TELEGRAM
-#
-#  Замена rest.db.ripe.net HTTP REST (→ 403 с VPS).
-#  Запрос: -r -T route,route6 -i mnt-by MNT-TELEGRAM
-#  Возвращает все route/route6 объекты под управлением MNT-TELEGRAM.
+#  ИСТОЧНИК 4: RIPE WHOIS REST
 # ══════════════════════════════════════════════════════════════════════════════
 def _src_ripe_whois_rest() -> tuple[list[str], int, str]:
     nets: list[str] = []
-    resp = _whois_ripe_tcp(f"-r -T route,route6 -i mnt-by {TG_MNT}")
-    if not resp:
-        return [], 0, "недоступен"
-    for line in resp.splitlines():
-        line = line.strip()
-        for obj_type in ("route6:", "route:"):
-            if line.lower().startswith(obj_type):
-                cidr = line.split(":", 1)[1].strip().split()[0]
-                if _valid_cidr(cidr):
-                    nets.append(cidr)
+    for obj_type in ("route", "route6"):
+        url = (f"https://rest.db.ripe.net/search.json"
+               f"?query-string={TG_MNT}&type-filter={obj_type}"
+               f"&flags=rG&source=RIPE")
+        raw = _http_get(url)
+        if not raw:
+            continue
+        try:
+            data = json.loads(raw)
+            for obj in data.get("objects", {}).get("object", []):
+                for attr in obj.get("attributes", {}).get("attribute", []):
+                    if attr.get("name") == obj_type:
+                        cidr = attr.get("value", "").strip()
+                        if _valid_cidr(cidr):
+                            nets.append(cidr)
+        except Exception:
+            continue
     if nets:
-        return nets, len(nets), f"{len(nets)} объектов (TCP whois)"
+        return nets, len(nets), f"{len(nets)} объектов"
     return [], 0, "недоступен"
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -586,10 +573,10 @@ def update_tg_nets_interactive() -> list[str]:
 
     # Строка каждого источника
     src_labels = {
-        "RIPE-stat":  "RIPE whois.ripe.net TCP",
-        "bgp.tools":  "bgp.tools/table.jsonl",
+        "RIPE-stat":  "RIPE NCC stat.ripe.net",
+        "bgp.tools":  "bgp.tools/as/XXXX (Originated)",
         "RADB-IRR":   "RADB / IRR whois TCP",
-        "RIPE-WHOIS": "RIPE WHOIS TCP (mnt-by)",
+        "RIPE-WHOIS": "RIPE WHOIS REST",
     }
     num_map = {"RIPE-stat": "1", "bgp.tools": "2", "RADB-IRR": "3", "RIPE-WHOIS": "4"}
 
@@ -644,10 +631,10 @@ def _print_sources_table(stats: dict) -> None:
     Формат: ║  [N] Название ·····················  ✓ статус  ║
     """
     src_labels = {
-        "RIPE-stat":  ("1", "RIPE whois.ripe.net TCP"),
-        "bgp.tools":  ("2", "bgp.tools table.jsonl"),
+        "RIPE-stat":  ("1", "RIPE NCC stat.ripe.net"),
+        "bgp.tools":  ("2", "bgp.tools/as/* Originated"),
         "RADB-IRR":   ("3", "RADB / IRR whois TCP"),
-        "RIPE-WHOIS": ("4", "RIPE WHOIS TCP (mnt-by)"),
+        "RIPE-WHOIS": ("4", "RIPE WHOIS REST"),
     }
     for key, (num, label) in src_labels.items():
         count, msg = stats.get(key, (0, "нет ответа"))

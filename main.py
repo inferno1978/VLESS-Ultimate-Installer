@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-VLESS Ultimate Installer v4.11.3 — Entry Point
+VLESS Ultimate Installer v4.11.2 — Entry Point
 =============================================
 Запуск: sudo python3 main.py
 
@@ -247,7 +247,7 @@ for _attempt in range(_MAX_RETRIES + 1):
             print_banner()
             print()
             _cc, _cn, _flag = get_server_country_cached()
-            info(f"VLESS Ultimate Installer v4.11.3 | RAM: {TOTAL_RAM}MB | CPU: {TOTAL_CPU} | {_flag} {_cn} ({_cc})")
+            info(f"VLESS Ultimate Installer v4.11.2 | RAM: {TOTAL_RAM}MB | CPU: {TOTAL_CPU} | {_flag} {_cn} ({_cc})")
             print()
             _time.sleep(1)
 
