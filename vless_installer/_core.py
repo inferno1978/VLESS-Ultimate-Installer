@@ -90,6 +90,7 @@ from vless_installer.modules.warp          import do_manage_warp
 from vless_installer.modules.smart_balancer import (
     do_manage_smart_balancer, _smart_balancer_run_once,
     PROBE_INTERVAL_MIN,
+    _AUTO_FALLBACK_CRON, _AUTO_FALLBACK_SCRIPT, _AUTO_FALLBACK_LOGFILE,
 )
 from vless_installer.modules.health import (
     health_check_xray, health_check_nginx, health_check_ssl,
