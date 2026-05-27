@@ -1138,29 +1138,30 @@ def do_manage_smart_balancer() -> None:
             os.system("clear")
             print()
 
-            # Ширины колонок фиксированы — BOX_W выводится из них, не наоборот.
-            # Это гарантирует что заголовок и данные всегда помещаются в рамку.
+            # Двухстрочный формат — каждая запись занимает 2 строки:
+            #   Строка 1: Время  Откуда → Куда
+            #   Строка 2: (отступ)  Score  Strat  Статус
+            # Это гарантирует что все данные помещаются в рамку при любой ширине терминала.
             _W_TS    = 19   # "2026-05-03 04:05:08"
             _W_ADDR  = 24   # "totalshadows.online:443"
             _W_SCORE =  6   # "0.0010"
             _W_STRAT =  7   # "smart"
-            _W_STAT  =  6   # "Статус" / "OK"
-            # Минимальная ширина: 2 + TS + 1 + ADDR + 1 + ADDR + 1 + SCORE + 1 + STRAT + 1 + STAT = 93
-            _HIST_BOX_W = 2 + _W_TS + 1 + _W_ADDR + 1 + _W_ADDR + 1 + _W_SCORE + 1 + _W_STRAT + 1 + _W_STAT
-
-            _BOX_W_saved_hist = _BOX_W  # type: ignore[name-defined]
-            _BOX_W = _HIST_BOX_W  # type: ignore[name-defined]
+            _W_INDENT = 2 + _W_TS + 1  # отступ для второй строки = выровнять под Откуда
 
             _box_top("История переключений Smart Balancer")  # type: ignore[name-defined]
             if not history:
                 _box_row(f"  {DIM}Переключений ещё не было{NC}")  # type: ignore[name-defined]
             else:
-                # Заголовок таблицы
+                # Заголовок таблицы — две строки
                 _box_row(  # type: ignore[name-defined]
                     f"  {BOLD}"
                     f"{'Время':<{_W_TS}} "
                     f"{'Откуда':<{_W_ADDR}} "
-                    f"{'Куда':<{_W_ADDR}} "
+                    f"{'Куда'}{NC}"
+                )
+                _box_row(  # type: ignore[name-defined]
+                    f"  {BOLD}"
+                    f"{'':<{_W_TS}} "
                     f"{'Score':>{_W_SCORE}} "
                     f"{'Strat':<{_W_STRAT}} "
                     f"Статус{NC}"
@@ -1175,17 +1176,21 @@ def do_manage_smart_balancer() -> None:
                     score  = f"{ev.get('score', 0):>{_W_SCORE}.4f}"
                     strat  = ev.get("strategy", "—")
                     status = ev.get("status", "?")
+                    # Строка 1: время, откуда, куда
                     _box_row(  # type: ignore[name-defined]
                         f"  {ts:<{_W_TS}} "
                         f"{frm:<{_W_ADDR}} "
-                        f"{to_:<{_W_ADDR}} "
+                        f"{to_}"
+                    )
+                    # Строка 2: score, стратегия, статус (с отступом под колонку откуда)
+                    _box_row(  # type: ignore[name-defined]
+                        f"  {'':<{_W_TS}} "
                         f"{score} "
                         f"{strat:<{_W_STRAT}} "
                         f"{col}{status}{NC}"
                     )
 
             _box_bottom()  # type: ignore[name-defined]
-            _BOX_W = _BOX_W_saved_hist  # type: ignore[name-defined]  восстанавливаем
             input(f"{CYAN}Нажмите Enter...{NC}")
 
         # ── 8: Снять карантин вручную ────────────────────────────────────
