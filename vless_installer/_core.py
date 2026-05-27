@@ -11942,6 +11942,15 @@ def awg_setup_remote_server(
     success(f"AWG: UDP/{AWG_EXIT_PORT} открыт на exit-VPS")
 
     # ── Запуск AWG-сервера ────────────────────────────────────────────────────
+    # BUGFIX: отключаем стандартный awg-quick@awg0.service если он есть —
+    # он конкурирует с amneziawg-awg0.service за интерфейс awg0 и при старте
+    # выдаёт "awg0 already exists", после чего awg show пуст (обычный wg
+    # вместо amneziawg поднимает интерфейс без Jc/Jmin/Jmax параметров).
+    _ssh(
+        "systemctl stop awg-quick@awg0.service 2>/dev/null || true; "
+        "systemctl disable awg-quick@awg0.service 2>/dev/null || true; "
+        "ip link delete awg0 2>/dev/null || true"
+    )
     r_start = _ssh(
         "systemctl daemon-reload && "
         "systemctl enable amneziawg-awg0.service && "
