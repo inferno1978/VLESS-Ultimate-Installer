@@ -12226,32 +12226,227 @@ def awg_rollback() -> None:
 
 
 def awg_verify_tunnel() -> bool:
-    """Проверяет работоспособность AWG-туннеля."""
+    """
+    Проверяет работоспособность AWG-туннеля послойно:
+      1. Интерфейс существует (ip link show)
+      2. Handshake (awg show latest-handshakes)
+      3. Трафик двусторонний (awg show transfer: sent > 0 и received > 0)
+      4. Ping через интерфейс до внутреннего IP exit-VPS
+      5. Policy routing: ip rule fwmark + маршрут в таблице + iptables mangle
+    Выводит итоговый бокс с диагнозом по каждому слою.
+    Возвращает True если туннель функционален (интерфейс + routing),
+    False если интерфейс не поднят.
+    """
     info("AWG: верификация туннеля...")
+    log_to_file("DEBUG", f"awg_verify_tunnel: iface={AWG_INTERFACE} fwmark={AWG_FWMARK} "
+                         f"table={AWG_ROUTE_TABLE} server_ip={AWG_SERVER_IP}")
 
-    r_link = _run(["ip", "link", "show", AWG_INTERFACE],
-                  capture=True, check=False)
-    if r_link.returncode != 0:
-        warn(f"AWG: интерфейс {AWG_INTERFACE} не существует")
-        return False
-    success(f"AWG: интерфейс {AWG_INTERFACE} — OK")
+    _ok   = f"{GREEN}✓{NC}"
+    _warn = f"{YELLOW}✗{NC}"
+    _skip = f"{DIM}−{NC}"
 
-    # Проверка awg show
-    awg_bin = AWG_BIN if awg_check_tool(AWG_BIN) else ("wg" if awg_check_tool("wg") else None)
-    if awg_bin:
-        r_show = _run([awg_bin, "show", AWG_INTERFACE], capture=True, check=False)
-        if r_show.returncode == 0 and "peer" in r_show.stdout.lower():
-            success("AWG: peer активен")
-        else:
-            warn("AWG: peer не обнаружен (туннель поднят, но handshake ещё не прошёл)")
+    results: list[str] = []   # строки для итогового бокса
 
-    # Проверка policy routing
-    r_rule = _run(["ip", "rule", "show"], capture=True, check=False)
-    if str(AWG_FWMARK) in (r_rule.stdout or ""):
-        success(f"AWG: policy routing (fwmark {AWG_FWMARK}) активен")
+    # ── 1. Интерфейс ─────────────────────────────────────────────────────────
+    r_link = _run(["ip", "link", "show", AWG_INTERFACE], capture=True, check=False)
+    iface_ok = r_link.returncode == 0
+    if iface_ok:
+        results.append(f"  {_ok}  Интерфейс {AWG_INTERFACE} поднят")
+        log_to_file("DEBUG", f"awg_verify: iface OK")
     else:
-        warn("AWG: policy routing rule не найдено")
+        results.append(f"  {_warn}  Интерфейс {AWG_INTERFACE} НЕ существует")
+        log_to_file("WARN", f"awg_verify: iface {AWG_INTERFACE} missing")
 
+    # ── 2. Handshake ─────────────────────────────────────────────────────────
+    handshake_ok   = False
+    handshake_str  = ""
+    awg_bin = AWG_BIN if awg_check_tool(AWG_BIN) else ("wg" if awg_check_tool("wg") else None)
+
+    if iface_ok and awg_bin:
+        try:
+            r_hs = _run([awg_bin, "show", AWG_INTERFACE, "latest-handshakes"],
+                        capture=True, check=False)
+            if r_hs.returncode == 0 and r_hs.stdout.strip():
+                for _line in r_hs.stdout.strip().splitlines():
+                    _parts = _line.split()
+                    if len(_parts) >= 2:
+                        try:
+                            _ts = int(_parts[-1])
+                        except ValueError:
+                            continue
+                        if _ts > 0:
+                            _ago = int(time.time()) - _ts
+                            _ago_str = f"{_ago}с" if _ago < 120 else f"{_ago // 60}м {_ago % 60}с"
+                            handshake_ok  = True
+                            handshake_str = _ago_str
+                            break
+                if handshake_ok:
+                    _hc = GREEN if int(time.time()) - _ts < 180 else YELLOW
+                    results.append(f"  {_ok}  Handshake: {_hc}{handshake_str} назад{NC}")
+                    log_to_file("DEBUG", f"awg_verify: handshake OK, {handshake_str} ago")
+                else:
+                    results.append(f"  {_warn}  Handshake: не установлен "
+                                   f"{DIM}(peer подключён?){NC}")
+                    log_to_file("WARN", "awg_verify: no handshake yet")
+            else:
+                results.append(f"  {_warn}  Handshake: нет данных от awg show")
+                log_to_file("WARN", f"awg_verify: awg show rc={r_hs.returncode}")
+        except Exception as _e:
+            results.append(f"  {_skip}  Handshake: ошибка ({_e})")
+            log_to_file("WARN", f"awg_verify: handshake check error: {_e}")
+    elif not awg_bin:
+        results.append(f"  {_skip}  Handshake: awg/wg бинарник не найден")
+        log_to_file("WARN", "awg_verify: no awg/wg binary for handshake check")
+    else:
+        results.append(f"  {_skip}  Handshake: пропущен (интерфейс не поднят)")
+
+    # ── 3. Transfer (sent > 0 и received > 0) ────────────────────────────────
+    transfer_sent = transfer_recv = 0
+    if iface_ok and awg_bin:
+        try:
+            r_tr = _run([awg_bin, "show", AWG_INTERFACE, "transfer"],
+                        capture=True, check=False)
+            if r_tr.returncode == 0 and r_tr.stdout.strip():
+                for _line in r_tr.stdout.strip().splitlines():
+                    _parts = _line.split()
+                    # формат: <pubkey> <received_bytes> <sent_bytes>
+                    if len(_parts) >= 3:
+                        try:
+                            transfer_recv += int(_parts[1])
+                            transfer_sent += int(_parts[2])
+                        except ValueError:
+                            pass
+                def _fmt_bytes(b: int) -> str:
+                    if b >= 1024 * 1024:
+                        return f"{b / (1024*1024):.1f} МБ"
+                    if b >= 1024:
+                        return f"{b / 1024:.1f} КБ"
+                    return f"{b} Б"
+                if transfer_sent > 0 and transfer_recv > 0:
+                    results.append(f"  {_ok}  Трафик: ↑{_fmt_bytes(transfer_sent)} "
+                                   f"↓{_fmt_bytes(transfer_recv)} {DIM}(двусторонний){NC}")
+                    log_to_file("DEBUG", f"awg_verify: transfer OK sent={transfer_sent} recv={transfer_recv}")
+                elif transfer_sent > 0 and transfer_recv == 0:
+                    results.append(f"  {_warn}  Трафик: ↑{_fmt_bytes(transfer_sent)} ↓0 "
+                                   f"{YELLOW}(односторонний — закрыт входящий UDP?){NC}")
+                    log_to_file("WARN", f"awg_verify: one-way tunnel sent={transfer_sent} recv=0")
+                else:
+                    results.append(f"  {_skip}  Трафик: нет данных "
+                                   f"{DIM}(handshake ещё не прошёл){NC}")
+                    log_to_file("DEBUG", "awg_verify: no transfer data yet")
+        except Exception as _e:
+            results.append(f"  {_skip}  Трафик: ошибка ({_e})")
+            log_to_file("WARN", f"awg_verify: transfer check error: {_e}")
+    else:
+        results.append(f"  {_skip}  Трафик: пропущен")
+
+    # ── 4. Ping до внутреннего IP exit-VPS через awg0 ────────────────────────
+    _server_ip_raw = AWG_SERVER_IP.split("/")[0] if AWG_SERVER_IP else ""
+    if iface_ok and _server_ip_raw:
+        try:
+            r_ping = _run(
+                ["ping", "-c", "2", "-W", "3", "-I", AWG_INTERFACE, _server_ip_raw],
+                capture=True, check=False
+            )
+            if r_ping.returncode == 0:
+                _m = re.search(r"time=([\d.]+)", r_ping.stdout)
+                _lat = f"{int(float(_m.group(1)))} мс" if _m else "OK"
+                _lc  = GREEN if _m and float(_m.group(1)) < 150 else                        YELLOW if _m and float(_m.group(1)) < 300 else RED
+                results.append(f"  {_ok}  Ping → {_server_ip_raw}: {_lc}{_lat}{NC}")
+                log_to_file("DEBUG", f"awg_verify: ping {_server_ip_raw} OK lat={_lat}")
+            else:
+                results.append(f"  {_warn}  Ping → {_server_ip_raw}: нет ответа "
+                               f"{DIM}(туннель не двусторонний?){NC}")
+                log_to_file("WARN", f"awg_verify: ping {_server_ip_raw} failed rc={r_ping.returncode}")
+        except Exception as _e:
+            results.append(f"  {_skip}  Ping: ошибка ({_e})")
+            log_to_file("WARN", f"awg_verify: ping error: {_e}")
+    elif _server_ip_raw:
+        results.append(f"  {_skip}  Ping: пропущен (интерфейс не поднят)")
+    else:
+        results.append(f"  {_skip}  Ping: AWG_SERVER_IP не задан")
+
+    # ── 5. Policy routing ─────────────────────────────────────────────────────
+    # 5a. ip rule fwmark
+    r_rule = _run(["ip", "rule", "show"], capture=True, check=False)
+    _rule_txt = r_rule.stdout or ""
+    fwmark_rule_ok = str(AWG_FWMARK) in _rule_txt
+    if fwmark_rule_ok:
+        results.append(f"  {_ok}  ip rule fwmark {AWG_FWMARK} → table {AWG_ROUTE_TABLE}")
+        log_to_file("DEBUG", f"awg_verify: fwmark rule OK")
+    else:
+        results.append(f"  {_warn}  ip rule: fwmark {AWG_FWMARK} не найдено")
+        log_to_file("WARN", f"awg_verify: fwmark {AWG_FWMARK} missing from ip rule show")
+
+    # 5b. Маршрут в таблице
+    r_rt = _run(["ip", "route", "show", "table", str(AWG_ROUTE_TABLE)],
+                capture=True, check=False)
+    route_ok = r_rt.returncode == 0 and bool((r_rt.stdout or "").strip())
+    if route_ok:
+        results.append(f"  {_ok}  Маршрут в таблице {AWG_ROUTE_TABLE}: "
+                       f"{DIM}{(r_rt.stdout or '').strip()[:40]}{NC}")
+        log_to_file("DEBUG", f"awg_verify: route table {AWG_ROUTE_TABLE} OK")
+    else:
+        results.append(f"  {_warn}  Маршрут в таблице {AWG_ROUTE_TABLE}: отсутствует")
+        log_to_file("WARN", f"awg_verify: no route in table {AWG_ROUTE_TABLE}")
+
+    # 5c. iptables mangle OUTPUT (uid xray)
+    try:
+        _xray_uid = pwd.getpwnam("xray").pw_uid
+        r_ipt = _run(
+            ["iptables", "-t", "mangle", "-C", "OUTPUT",
+             "-m", "owner", "--uid-owner", str(_xray_uid),
+             "-j", "MARK", "--set-mark", str(AWG_FWMARK)],
+            capture=True, check=False
+        )
+        if r_ipt.returncode == 0:
+            results.append(f"  {_ok}  iptables mangle: uid(xray={_xray_uid}) → "
+                           f"mark {AWG_FWMARK}")
+            log_to_file("DEBUG", "awg_verify: iptables mangle rule OK")
+        else:
+            results.append(f"  {_warn}  iptables mangle: правило для uid(xray) не найдено")
+            log_to_file("WARN", "awg_verify: iptables mangle rule missing")
+    except KeyError:
+        results.append(f"  {_skip}  iptables mangle: пользователь xray не найден")
+        log_to_file("WARN", "awg_verify: xray user not found for iptables check")
+    except Exception as _e:
+        results.append(f"  {_skip}  iptables mangle: ошибка проверки ({_e})")
+        log_to_file("WARN", f"awg_verify: iptables check error: {_e}")
+
+    # ── Итоговый бокс ─────────────────────────────────────────────────────────
+    print()
+    _box_top("AWG: результаты верификации")
+    for _line in results:
+        _box_row(_line)
+    _box_sep()
+
+    # Диагностические подсказки при проблемах
+    _hints: list[str] = []
+    if not iface_ok:
+        _hints.append(f"journalctl -u amneziawg-awg0 -n 30")
+        _hints.append(f"awg-quick up {_AWG_ACTIVE_CONF}")
+    if iface_ok and not fwmark_rule_ok:
+        _hints.append(f"ip rule add fwmark {AWG_FWMARK} table {AWG_ROUTE_TABLE} priority 100")
+    if iface_ok and not route_ok:
+        _hints.append(f"ip route add default dev {AWG_INTERFACE} table {AWG_ROUTE_TABLE}")
+    if transfer_sent > 0 and transfer_recv == 0:
+        _hints.append(f"# На exit-VPS: проверьте входящий UDP/{AWG_EXIT_PORT}")
+        _hints.append(f"iptables -A INPUT -p udp --dport {AWG_EXIT_PORT} -j ACCEPT")
+
+    if _hints:
+        _box_warn("Команды для ручного исправления:")
+        for _h in _hints:
+            _box_row(f"  {DIM}{_h}{NC}")
+    else:
+        _box_ok("Все слои верификации пройдены")
+
+    _box_bottom()
+
+    if not iface_ok:
+        log_to_file("WARN", "awg_verify_tunnel: FAILED — interface not up")
+        return False
+
+    log_to_file("DEBUG", "awg_verify_tunnel: OK")
     return True
 
 
@@ -30313,18 +30508,111 @@ def _awg_apply_policy_routing_all_nodes() -> None:
 
 
 def _awg_verify_all_tunnels() -> None:
-    """Проверяет статус всех AWG-туннелей."""
+    """
+    Проверяет статус всех AWG-туннелей (multi-node).
+    Для каждой ноды: интерфейс + handshake + ping до внутреннего IP.
+    Обновляет node["status"] и сохраняет в state.
+    """
     nodes = AWG_NODES if AWG_NODES else [_awg_node_from_globals(0)]
+    awg_bin = AWG_BIN if awg_check_tool(AWG_BIN) else ("wg" if awg_check_tool("wg") else None)
+
+    _ok   = f"{GREEN}✓{NC}"
+    _warn = f"{YELLOW}✗{NC}"
+    _skip = f"{DIM}−{NC}"
+
+    print()
+    _box_top("AWG Multi-Node: результаты верификации")
+
     for node in nodes:
-        iface = node["interface"]
-        r = _run(["ip", "link", "show", iface], capture=True, check=False)
-        if r.returncode == 0:
-            success(f"AWG: интерфейс {iface} активен")
+        iface      = node["interface"]
+        server_ip  = node.get("server_ip", "").split("/")[0]
+        exit_host  = node.get("host", "")
+        fwmark     = node.get("fwmark", AWG_FWMARK)
+        route_tbl  = node.get("route_table", AWG_ROUTE_TABLE)
+
+        _box_row(f"  {DIM}Нода: {iface} → {exit_host}{NC}")
+
+        # Интерфейс
+        r_link = _run(["ip", "link", "show", iface], capture=True, check=False)
+        iface_ok = r_link.returncode == 0
+        if iface_ok:
+            _box_row(f"    {_ok}  Интерфейс {iface} активен")
             node["status"] = "up"
+            log_to_file("DEBUG", f"_awg_verify_all: {iface} up")
         else:
-            warn(f"AWG: интерфейс {iface} НЕ поднят")
+            _box_row(f"    {_warn}  Интерфейс {iface} НЕ поднят")
             node["status"] = "down"
+            log_to_file("WARN", f"_awg_verify_all: {iface} not found")
+
+        # Handshake
+        if iface_ok and awg_bin:
+            try:
+                r_hs = _run([awg_bin, "show", iface, "latest-handshakes"],
+                            capture=True, check=False)
+                if r_hs.returncode == 0 and r_hs.stdout.strip():
+                    _hs_ok = False
+                    for _line in r_hs.stdout.strip().splitlines():
+                        _parts = _line.split()
+                        if len(_parts) >= 2:
+                            try:
+                                _ts = int(_parts[-1])
+                            except ValueError:
+                                continue
+                            if _ts > 0:
+                                _ago = int(time.time()) - _ts
+                                _ago_str = (f"{_ago}с" if _ago < 120
+                                            else f"{_ago // 60}м {_ago % 60}с")
+                                _hc = GREEN if _ago < 180 else YELLOW
+                                _box_row(f"    {_ok}  Handshake: "
+                                         f"{_hc}{_ago_str} назад{NC}")
+                                log_to_file("DEBUG",
+                                    f"_awg_verify_all: {iface} handshake {_ago_str} ago")
+                                _hs_ok = True
+                                break
+                    if not _hs_ok:
+                        _box_row(f"    {_warn}  Handshake: не установлен")
+                        log_to_file("WARN", f"_awg_verify_all: {iface} no handshake")
+                else:
+                    _box_row(f"    {_skip}  Handshake: нет данных")
+            except Exception as _e:
+                _box_row(f"    {_skip}  Handshake: ошибка ({_e})")
+                log_to_file("WARN", f"_awg_verify_all: {iface} handshake error: {_e}")
+
+        # Ping до внутреннего IP exit-VPS
+        if iface_ok and server_ip:
+            try:
+                r_ping = _run(
+                    ["ping", "-c", "2", "-W", "3", "-I", iface, server_ip],
+                    capture=True, check=False
+                )
+                if r_ping.returncode == 0:
+                    _m = re.search(r"time=([\d.]+)", r_ping.stdout)
+                    _lat = f"{int(float(_m.group(1)))} мс" if _m else "OK"
+                    _lc  = GREEN if _m and float(_m.group(1)) < 150 else                            YELLOW if _m and float(_m.group(1)) < 300 else RED
+                    _box_row(f"    {_ok}  Ping → {server_ip}: {_lc}{_lat}{NC}")
+                    log_to_file("DEBUG", f"_awg_verify_all: {iface} ping {server_ip} OK")
+                else:
+                    _box_row(f"    {_warn}  Ping → {server_ip}: нет ответа")
+                    log_to_file("WARN",
+                        f"_awg_verify_all: {iface} ping {server_ip} failed")
+            except Exception as _e:
+                _box_row(f"    {_skip}  Ping: ошибка ({_e})")
+                log_to_file("WARN", f"_awg_verify_all: {iface} ping error: {_e}")
+        elif iface_ok:
+            _box_row(f"    {_skip}  Ping: server_ip не задан")
+
+        # Policy routing
+        r_rule = _run(["ip", "rule", "show"], capture=True, check=False)
+        if str(fwmark) in (r_rule.stdout or ""):
+            _box_row(f"    {_ok}  ip rule fwmark {fwmark} → table {route_tbl}")
+        else:
+            _box_row(f"    {_warn}  ip rule: fwmark {fwmark} не найдено")
+            log_to_file("WARN", f"_awg_verify_all: {iface} fwmark {fwmark} missing")
+
         node["last_check"] = datetime.now(timezone.utc).isoformat()
+        _box_sep()
+
+    _box_bottom()
     _awg_save_nodes_to_state(nodes)
 
 
