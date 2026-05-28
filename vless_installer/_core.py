@@ -5995,6 +5995,22 @@ def configure_firewall() -> None:
     info("Настройка файрволла...")
     PROGRESS.update(2, "Файрволл")
 
+    # Проверяем INPUT policy DROP — предупреждаем если провайдер блокирует входящие.
+    # Скрипт откроет нужные порты через iptables/ufw, но некоторые провайдеры
+    # (например AEZA) управляют файрволом на уровне гипервизора и могут
+    # перекрыть правила скрипта. В таком случае нужно открыть порты вручную
+    # в панели управления провайдера.
+    try:
+        import subprocess as _sp_fw
+        _r = _sp_fw.run(["iptables", "-L", "INPUT", "-n"], capture_output=True, text=True)
+        if "policy DROP" in _r.stdout:
+            warn("Обнаружен файрвол с политикой INPUT DROP.")
+            warn("Скрипт откроет нужные порты автоматически.")
+            warn("Если после установки порты недоступны — откройте их вручную")
+            warn("в панели управления вашего провайдера.")
+    except Exception:
+        pass
+
     fw_tool = ""
     if command_exists("ufw"):
         fw_tool = "ufw"
@@ -6079,6 +6095,34 @@ def configure_firewall() -> None:
 
         if PKG_MGR == "apt":
             _pkg_install("iptables-persistent")
+
+        # Fallback: если netfilter-persistent недоступен — создаём rc.local
+        # чтобы правила iptables восстанавливались после перезагрузки.
+        try:
+            import subprocess as _sp_rc
+            _nfp = _sp_rc.run(["which", "netfilter-persistent"], capture_output=True)
+            if _nfp.returncode != 0:
+                _rc = Path("/etc/rc.local")
+                _rc_shebang = "#!/bin/bash" + chr(10)
+                _rc_content = _rc.read_text() if _rc.exists() else _rc_shebang
+                if "iptables-restore" not in _rc_content:
+                    if not _rc_content.endswith(chr(10)):
+                        _rc_content += chr(10)
+                    _rc_content = _rc_content.replace("exit 0" + chr(10), "").rstrip() + chr(10)
+                    _rc_content += (
+                        chr(10) + "# Restore iptables rules (added by vless-installer)" + chr(10) +
+                        "[ -f /etc/iptables/rules.v4 ] && iptables-restore < /etc/iptables/rules.v4" + chr(10) +
+                        "[ -f /etc/iptables/rules.v6 ] && ip6tables-restore < /etc/iptables/rules.v6" + chr(10) +
+                        "exit 0" + chr(10)
+                    )
+                    _rc.write_text(_rc_content)
+                    import os as _os_rc
+                    _os_rc.chmod(str(_rc), 0o755)
+                    _sp_rc.run(["systemctl", "enable", "rc-local"], capture_output=True)
+                    info("iptables: создан rc.local fallback для восстановления правил после ребута")
+        except Exception:
+            pass
+
         success("iptables + ip6tables настроены")
     else:
         warn("Файрволл не найден — пропускаем")
@@ -12775,6 +12819,24 @@ def do_full_install() -> None:
     if PARAM_USE_DNSCRYPT:
         apply_dnscrypt_tuning()
     configure_firewall();           PROGRESS.update(5,  "Файрволл")
+
+    # Проверяем доступность порта снаружи — только предупреждение, не блокировка.
+    # Если провайдер управляет файрволом на уровне гипервизора (AEZA и др.),
+    # iptables правил скрипта может быть недостаточно.
+    try:
+        import socket as _sock
+        _s = _sock.socket(_sock.AF_INET, _sock.SOCK_STREAM)
+        _s.settimeout(3)
+        _local_ip = _sock.gethostbyname(_sock.gethostname())
+        _res = _s.connect_ex((_local_ip, SERVER_PORT))
+        _s.close()
+        if _res != 0:
+            warn(f"Порт {SERVER_PORT}/tcp может быть недоступен снаружи.")
+            warn(f"Если клиент не подключается — откройте порт {SERVER_PORT}/tcp")
+            warn(f"в панели управления вашего провайдера.")
+    except Exception:
+        pass
+
     apply_network_optimizations();  PROGRESS.update(5,  "Оптимизация")
     install_xray();                 PROGRESS.update(10, "Xray")
     generate_reality_keys();        PROGRESS.update(3,  "Ключи")
