@@ -117,7 +117,7 @@ VLESS-Ultimate-Installer/
 
 ```
                               ┌──► Exit VPS 1 (EU) ──►┐
-Клиент ──► Entry VPS (RU) ───┼──► Exit VPS 2 (US) ──►├──► Интернет
+Клиент ──► Entry VPS (RU) ─── ┼──► Exit VPS 2 (US) ──►├──► Интернет
                               └──► Exit VPS 3 (AS) ──►┘
 ```
 
@@ -129,7 +129,7 @@ VLESS-Ultimate-Installer/
 │                                                             │
 │  bootstrap.sh ──► main.py ──exec──► _core.py                │
 │                                         │                   │
-│                               modules/ (v4.11.4)              │
+│                               modules/ (v4.11.4)            │
 │                                         │                   │
 │         Xray-core              Nginx (TLS)                  │
 │         /etc/xray/             /etc/nginx/                  │
