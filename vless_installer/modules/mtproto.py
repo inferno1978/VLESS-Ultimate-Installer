@@ -276,6 +276,26 @@ def _banner() -> None:
 # ══════════════════════════════════════════════════════════════════════════════
 #  IP И СЕТЬ
 # ══════════════════════════════════════════════════════════════════════════════
+def _get_local_primary_ipv4() -> str:
+    """Return the primary non-loopback IPv4 address assigned to a local interface."""
+    try:
+        import socket
+        # Connect to an external address (no data sent) to discover the outbound interface IP
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
+            s.connect(("8.8.8.8", 80))
+            return s.getsockname()[0]
+    except Exception:
+        pass
+    # Fallback: parse `ip addr` for the first global inet address
+    try:
+        out = _run(["ip", "-4", "addr", "show", "scope", "global"], capture=True).stdout
+        m = re.search(r'inet\s+([\d.]+)/', out)
+        if m:
+            return m.group(1)
+    except Exception:
+        pass
+    return ""
+
 def _get_public_ip() -> tuple:
     ipv4, ipv6 = "", ""
     for url in ("https://api.ipify.org", "https://ifconfig.me/ip"):
@@ -285,6 +305,14 @@ def _get_public_ip() -> tuple:
             break
         except Exception:
             pass
+    # If the detected external IP is not assigned to any local interface (e.g. the
+    # server is an entry node behind NAT and the external request exits via a
+    # different egress node), fall back to the actual local interface IP so that
+    # generated tg:// links point to *this* machine.
+    if ipv4 and not _is_direct_ip(ipv4):
+        local_ip = _get_local_primary_ipv4()
+        if local_ip:
+            ipv4 = local_ip
     try:
         with urllib.request.urlopen("https://api6.ipify.org", timeout=5) as r:
             ipv6 = r.read().decode().strip()
