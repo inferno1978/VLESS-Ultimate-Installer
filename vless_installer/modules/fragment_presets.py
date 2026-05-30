@@ -86,7 +86,7 @@ def _warn(msg: str)    -> None: print(f"{YELLOW}[WARN]{NC}  {msg}");  _log("WARN
 
 # ── Импорт зависимостей ────────────────────────────────────────────────────
 from vless_installer.modules.box_renderer import (
-    _box_top, _box_sep, _box_bottom, _box_row, _box_item, _box_back,
+    _box_top, _box_sep, _box_bottom, _box_row, _box_row_auto, _box_item, _box_back,
     _box_info, _box_warn, _box_desc, _box_ok, _get_box_width,
 )
 from vless_installer.modules.fragment_config import generate_fragment_client_config
@@ -352,9 +352,10 @@ def do_fragment_presets_menu() -> None:
         g = preset["group"]
         if g != current_group:
             _box_row()
-            _box_row(f"  {_GROUP_LABELS.get(g, g)}")
+            _box_row_auto(f"  {_GROUP_LABELS.get(g, g)}")
             current_group = g
-        _box_row(f"    {DIM}• {preset['name']}{NC}  —  {DIM}{preset['hint']}{NC}")
+        _box_row(f"    {DIM}• {preset['name']}{NC}")
+        _box_row(f"       {DIM}{preset['hint']}{NC}")
 
     _box_row()
     _box_info(f"Итого: {len(PRESET_MATRIX)} конфигов")
