@@ -1,16 +1,12 @@
 """
 vless_installer/modules/tg_nets.py
 ───────────────────────────────────────────────────────────────────────────────
-Управление подсетями Telegram: хранение, обновление из всех источников,
+Управление подсетями Telegram: хранение, обновление из источника RIPE NCC,
 применение к iptables/ipset.
 
-Источники (4 независимых канала, работают параллельно):
+Источник:
 
   1. RIPE NCC stat.ripe.net  — live BGP-анонсы по ASN (announced-prefixes)
-  2. bgp.tools/as/XXXX       — HTML-парсинг страниц AS (только Originated,
-                               без Low Visibility префиксов)
-  3. RADB / IRR whois TCP    — route-объекты + expand AS-TELEGRAM set
-  4. RIPE WHOIS REST         — объекты с mnt-by: MNT-TELEGRAM
 
 ASN Telegram:
   AS62041  основной (Europe / Americas / Singapore)
@@ -607,13 +603,10 @@ def update_tg_nets_interactive() -> list[str]:
     # Строка каждого источника
     src_labels = {
         "RIPE-stat":  "RIPE NCC stat.ripe.net",
-        "bgp.tools":  "bgp.tools/as/XXXX (Originated)",
-        "RADB-IRR":   "RADB / IRR whois TCP",
-        "RIPE-WHOIS": "RIPE WHOIS REST",
     }
-    num_map = {"RIPE-stat": "1", "bgp.tools": "2", "RADB-IRR": "3", "RIPE-WHOIS": "4"}
+    num_map = {"RIPE-stat": "1"}
 
-    for key in ("RIPE-stat", "bgp.tools", "RADB-IRR", "RIPE-WHOIS"):
+    for key in ("RIPE-stat",):
         count, msg = stats.get(key, (0, "нет ответа"))
         ok = count > 0
         status_col = GREEN if ok else YELLOW
@@ -665,9 +658,6 @@ def _print_sources_table(stats: dict) -> None:
     """
     src_labels = {
         "RIPE-stat":  ("1", "RIPE NCC stat.ripe.net"),
-        "bgp.tools":  ("2", "bgp.tools/as/* Originated"),
-        "RADB-IRR":   ("3", "RADB / IRR whois TCP"),
-        "RIPE-WHOIS": ("4", "RIPE WHOIS REST"),
     }
     for key, (num, label) in src_labels.items():
         count, msg = stats.get(key, (0, "нет ответа"))
@@ -707,7 +697,7 @@ def update_tg_nets_interactive() -> list[str]:  # type: ignore[no-redef]
     _brow()
     _bkv("ASN:", asn_part1, kw=12)
     _bkv("",    asn_part2,  kw=12)
-    _bkv("Режим:", "4 источника, параллельный запрос", kw=12)
+    _bkv("Режим:", "1 источник (RIPE NCC)", kw=12)
     _brow()
     _box_sep()
     _brow(f"  {DIM}Запрашиваю данные — это может занять 15–20 с...{NC}")
