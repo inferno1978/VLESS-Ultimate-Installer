@@ -73,6 +73,30 @@ INSTALL_DIR="/opt/vless-ultimate"
 REPO_URL="https://github.com/inferno1978/VLESS-Ultimate-Installer"
 BRANCH="main"
 
+# Ищем существующую установку в нестандартных местах
+_found=""
+for _candidate in \
+    "/home/inferno1978/VLESS-Ultimate-Installer" \
+    "/root/VLESS-Ultimate-Installer" \
+    "/opt/VLESS-Ultimate-Installer"
+do
+    if [[ -f "${_candidate}/main.py" ]]; then
+        _found="$_candidate"
+        break
+    fi
+done
+# Также ищем через glob в /home/*/
+if [[ -z "$_found" ]]; then
+    for _p in /home/*/VLESS-Ultimate-Installer/main.py; do
+        [[ -f "$_p" ]] && { _found="${_p%/main.py}"; break; }
+    done
+fi
+if [[ -n "$_found" && "$_found" != "$INSTALL_DIR" ]]; then
+    warn "Найдена существующая установка: ${_found}"
+    info "Обновляю её (а не ${INSTALL_DIR})..."
+    INSTALL_DIR="$_found"
+fi
+
 if [[ -d "${INSTALL_DIR}/.git" ]]; then
     info "Обновление существующей git-установки..."
     cd "$INSTALL_DIR"
