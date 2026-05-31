@@ -191,8 +191,8 @@ def _show_page(top: list[str], page: int, current: list[str], sorted_by_rtt: boo
         _box_desc(f"Топ-{len(top)} резолверов по latency с этого сервера. Выберите 2–3. Номера через запятую.")
     else:
         _box_desc(f"{len(top)} резолверов (алфавитный порядок — latency будет после накопления статистики). Выберите 2–3.")
-    _box_sep()
-    _box_row()
+    _box_bottom()
+    print()
 
     for i in range(start, end):
         name   = top[i]
@@ -200,9 +200,7 @@ def _show_page(top: list[str], page: int, current: list[str], sorted_by_rtt: boo
         num    = f"{i + 1:>3}."
         print(f"  {WHITE}{num}{NC}  {CYAN}{name}{NC}{marker}")
 
-    _box_row()
-    _box_sep()
-
+    print()
     nav = []
     if page > 0:
         nav.append(f"{WHITE}P{NC} — предыдущая")
@@ -210,6 +208,7 @@ def _show_page(top: list[str], page: int, current: list[str], sorted_by_rtt: boo
         nav.append(f"{WHITE}N{NC} — следующая")
     nav.append(f"{WHITE}Q{NC} — отмена")
 
+    _box_top("")
     _box_row(f"  {DIM}Навигация: {('  |  '.join(nav))}{NC}")
     _box_row(f"  {DIM}Или введите номера через запятую (например: 1,3,7):{NC}")
     _box_bottom()
