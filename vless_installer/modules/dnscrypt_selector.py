@@ -88,26 +88,45 @@ _PAGE_SIZE     = 20   # по 20 на страницу
 
 # ── Получение списка резолверов ────────────────────────────────────────────
 
-def _fetch_resolver_list() -> list[str]:
+def _fetch_resolver_list() -> tuple[list[str], bool]:
     """
-    Запускает dnscrypt-proxy -list -sort rtt.
-    Возвращает список имён резолверов в порядке возрастания RTT.
+    Пытается получить список резолверов отсортированных по RTT.
+    Если -sort rtt недоступен или возвращает пустой список —
+    делает fallback на обычный -list (алфавитный порядок).
+    Возвращает (список имён, sorted_by_rtt: bool).
     """
+    def _parse_names(stdout: str) -> list[str]:
+        names = []
+        for line in stdout.splitlines():
+            line = line.strip()
+            if line and not line.startswith("[") and " " not in line:
+                names.append(line)
+        return names
+
+    # Сначала пробуем -sort rtt
     try:
         r = subprocess.run(
             [str(_DNSCRYPT_BIN), "-config", str(_DNSCRYPT_CONF),
              "-list", "-sort", "rtt"],
             capture_output=True, text=True, timeout=60,
         )
-        names = []
-        for line in r.stdout.splitlines():
-            line = line.strip()
-            if line and not line.startswith("[") and " " not in line:
-                names.append(line)
-        return names
+        names = _parse_names(r.stdout)
+        if names:
+            return names, True
+    except Exception:
+        pass
+
+    # Fallback: обычный -list без сортировки
+    try:
+        r = subprocess.run(
+            [str(_DNSCRYPT_BIN), "-config", str(_DNSCRYPT_CONF), "-list"],
+            capture_output=True, text=True, timeout=30,
+        )
+        names = _parse_names(r.stdout)
+        return names, False
     except Exception as e:
         _warn(f"Ошибка запуска dnscrypt-proxy -list: {e}")
-        return []
+        return [], False
 
 
 def _get_current_server_names() -> list[str]:
@@ -159,7 +178,7 @@ def _apply_server_names(names: list[str]) -> bool:
 
 # ── Постраничный вывод ────────────────────────────────────────────────────
 
-def _show_page(top: list[str], page: int, current: list[str]) -> None:
+def _show_page(top: list[str], page: int, current: list[str], sorted_by_rtt: bool = True) -> None:
     """Выводит одну страницу списка резолверов."""
     start = page * _PAGE_SIZE
     end   = min(start + _PAGE_SIZE, len(top))
@@ -168,10 +187,10 @@ def _show_page(top: list[str], page: int, current: list[str]) -> None:
     os.system("clear")
     print()
     _box_top(f"🔍  ВЫБОР DNSCRYPT-РЕЗОЛВЕРОВ  —  стр. {page + 1}/{total_pages}")
-    _box_desc(
-        f"Топ-{len(top)} резолверов по latency с этого сервера. "
-        "Выберите 2–3 для надёжности. Номера вводятся через запятую."
-    )
+    if sorted_by_rtt:
+        _box_desc(f"Топ-{len(top)} резолверов по latency с этого сервера. Выберите 2–3. Номера через запятую.")
+    else:
+        _box_desc(f"{len(top)} резолверов (алфавитный порядок — latency будет после накопления статистики). Выберите 2–3.")
     _box_sep()
     _box_row()
 
@@ -235,16 +254,16 @@ def do_dnscrypt_selector_menu() -> None:
     else:
         _info("server_names не установлен (используется весь пул)")
     print()
-    _info("Запускаю замер latency — это займёт 15–60 секунд...")
+    _info("Получаю список резолверов (попытка сортировки по latency)...")
     print()
 
-    resolvers = _fetch_resolver_list()
+    resolvers, sorted_by_rtt = _fetch_resolver_list()
 
     if not resolvers:
         _warn("Список резолверов пуст. Возможные причины:")
         print(f"  {DIM}• DNSCrypt ещё не скачал public-resolvers.md (подождите минуту){NC}")
         print(f"  {DIM}• Нет доступа к интернету с сервера{NC}")
-        print(f"  {DIM}• Версия dnscrypt-proxy не поддерживает -sort rtt{NC}")
+        print(f"  {DIM}• Версия dnscrypt-proxy не поддерживает -list{NC}")
         print()
         _info("Попробуйте вручную:")
         print(f"  {CYAN}dnscrypt-proxy -config {_DNSCRYPT_CONF} -list | head -30{NC}")
@@ -257,7 +276,7 @@ def do_dnscrypt_selector_menu() -> None:
 
     # ── Постраничный выбор ────────────────────────────────────────────────
     while True:
-        _show_page(top, page, current)
+        _show_page(top, page, current, sorted_by_rtt)
 
         try:
             raw = input(f"{CYAN}Выбор:{NC} ").strip()
