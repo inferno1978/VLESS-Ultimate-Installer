@@ -90,11 +90,13 @@ _PAGE_SIZE     = 20   # по 20 на страницу
 
 def _fetch_resolver_list() -> tuple[list[str], bool]:
     """
-    Пытается получить список резолверов отсортированных по RTT.
-    Если -sort rtt недоступен или возвращает пустой список —
-    делает fallback на обычный -list (алфавитный порядок).
+    Получает полный список резолверов.
+    Временно создаёт конфиг без server_names чтобы получить весь пул,
+    затем пробует -sort rtt, при неудаче — обычный -list.
     Возвращает (список имён, sorted_by_rtt: bool).
     """
+    import tempfile, shutil
+
     def _parse_names(stdout: str) -> list[str]:
         names = []
         for line in stdout.splitlines():
@@ -103,23 +105,33 @@ def _fetch_resolver_list() -> tuple[list[str], bool]:
                 names.append(line)
         return names
 
-    # Сначала пробуем -sort rtt
+    # Создаём временный конфиг без server_names — чтобы видеть весь пул
+    tmp_conf = None
     try:
+        content = _DNSCRYPT_CONF.read_text()
+        # Убираем server_names из временного конфига
+        tmp_content = re.sub(r"^server_names\s*=\s*\[.*?\]\n?", "", content, flags=re.MULTILINE)
+        fd, tmp_conf = tempfile.mkstemp(suffix=".toml")
+        with os.fdopen(fd, "w") as f:
+            f.write(tmp_content)
+    except Exception:
+        tmp_conf = None
+
+    conf = tmp_conf if tmp_conf else str(_DNSCRYPT_CONF)
+
+    try:
+        # Пробуем -sort rtt
         r = subprocess.run(
-            [str(_DNSCRYPT_BIN), "-config", str(_DNSCRYPT_CONF),
-             "-list", "-sort", "rtt"],
+            [str(_DNSCRYPT_BIN), "-config", conf, "-list", "-sort", "rtt"],
             capture_output=True, text=True, timeout=60,
         )
         names = _parse_names(r.stdout)
         if names:
             return names, True
-    except Exception:
-        pass
 
-    # Fallback: обычный -list без сортировки
-    try:
+        # Fallback: обычный -list
         r = subprocess.run(
-            [str(_DNSCRYPT_BIN), "-config", str(_DNSCRYPT_CONF), "-list"],
+            [str(_DNSCRYPT_BIN), "-config", conf, "-list"],
             capture_output=True, text=True, timeout=30,
         )
         names = _parse_names(r.stdout)
@@ -127,6 +139,12 @@ def _fetch_resolver_list() -> tuple[list[str], bool]:
     except Exception as e:
         _warn(f"Ошибка запуска dnscrypt-proxy -list: {e}")
         return [], False
+    finally:
+        if tmp_conf:
+            try:
+                os.unlink(tmp_conf)
+            except Exception:
+                pass
 
 
 def _get_current_server_names() -> list[str]:
