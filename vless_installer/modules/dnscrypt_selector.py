@@ -185,17 +185,76 @@ def _measure_all_latency(resolvers: list[str], port: int) -> list[tuple[str, flo
         """Быстрый TCP-пинг до резолвера по имени через публичный IP."""
         # Маппинг известных резолверов на их IP
         KNOWN_IPS: dict[str, str] = {
-            "cloudflare":           "1.1.1.1",
-            "cloudflare-ipv6":      "2606:4700:4700::1111",
-            "cloudflare-security":  "1.1.1.2",
-            "cloudflare-family":    "1.1.1.3",
-            "google":               "8.8.8.8",
-            "google-ipv6":          "2001:4860:4860::8888",
-            "adguard-dns":          "94.140.14.14",
-            "adguard-dns-doh":      "94.140.14.14",
-            "adguard-dns-unfiltered": "94.140.14.140",
-            "quad9-dnscrypt-ip4-filter-pri": "9.9.9.9",
-            "quad9-dnscrypt-ip4-nofilter-pri": "9.9.9.10",
+            # Cloudflare
+            "cloudflare":                        "1.1.1.1",
+            "cloudflare-ipv6":                   "2606:4700:4700::1111",
+            "cloudflare-security":               "1.1.1.2",
+            "cloudflare-security-ipv6":          "2606:4700:4700::1112",
+            "cloudflare-family":                 "1.1.1.3",
+            "cloudflare-family-ipv6":            "2606:4700:4700::1113",
+            # Google
+            "google":                            "8.8.8.8",
+            "google-ipv6":                       "2001:4860:4860::8888",
+            # AdGuard
+            "adguard-dns":                       "94.140.14.14",
+            "adguard-dns-ipv6":                  "2a10:50c0::ad1:ff",
+            "adguard-dns-doh":                   "94.140.14.14",
+            "adguard-dns-family":                "94.140.14.15",
+            "adguard-dns-family-doh":            "94.140.14.15",
+            "adguard-dns-unfiltered":            "94.140.14.140",
+            "adguard-dns-unfiltered-doh":        "94.140.14.140",
+            # Quad9
+            "quad9-dnscrypt-ip4-filter-pri":     "9.9.9.9",
+            "quad9-dnscrypt-ip4-nofilter-pri":   "9.9.9.10",
+            "quad9-dnscrypt-ip4-filter-alt":     "149.112.112.9",
+            "quad9-dnscrypt-ip4-nofilter-alt":   "149.112.112.10",
+            "quad9-doh-ip4-port443-filter-pri":  "9.9.9.9",
+            "quad9-doh-ip4-port443-nofilter-pri":"9.9.9.10",
+            # CleanBrowsing
+            "cleanbrowsing-adult":               "185.228.168.10",
+            "cleanbrowsing-family":              "185.228.168.168",
+            "cleanbrowsing-security":            "185.228.168.9",
+            "cleanbrowsing-adult-doh":           "185.228.168.10",
+            "cleanbrowsing-family-doh":          "185.228.168.168",
+            "cleanbrowsing-security-doh":        "185.228.168.9",
+            # OpenDNS
+            "opendns-familyshield":              "208.67.222.123",
+            "opendns-familyshield-ipv6":         "2620:119:35::123",
+            # Cisco Umbrella
+            "cisco-doh":                         "208.67.222.222",
+            # NextDNS
+            "nextdns":                           "45.90.28.0",
+            "nextdns-doh":                       "45.90.28.0",
+            # Mullvad
+            "mullvad-doh":                       "194.242.2.2",
+            "mullvad-adblock-doh":               "194.242.2.3",
+            "mullvad-family-doh":                "194.242.2.4",
+            "mullvad-extended-doh":              "194.242.2.5",
+            "mullvad-all-doh":                   "194.242.2.9",
+            # ControlD
+            "controld-block-malware":            "76.76.2.1",
+            "controld-unfiltered":               "76.76.2.0",
+            "controld-block-malware-doh":        "76.76.2.1",
+            # Comss.one (RU)
+            "comss.one":                         "92.38.135.1",
+            # DNS.SB
+            "dnssb-ipv4-a":                      "185.222.222.222",
+            "dnssb-ipv4-b":                      "45.11.45.11",
+            # a-and-a
+            "a-and-a":                           "217.169.20.23",
+            # Bortzmeyer
+            "bortzmeyer":                        "193.70.85.11",
+            "bortzmeyer-doh":                    "193.70.85.11",
+            # CipherDNS
+            "cipherdns-jb1-za":                  "41.185.28.195",
+            "cipherdns-jb1-doh-za":              "41.185.28.195",
+            # CS (CryptoStorm)
+            "cs-austria":                        "5.9.164.112",
+            "cs-barcelona":                      "80.241.218.68",
+            "cs-belgium":                        "193.34.145.92",
+            # Brahma World
+            "brahma-world":                      "216.18.214.193",
+            "brahma-world-ipv6":                 "2602:fea7:d00::1",
         }
         ip = KNOWN_IPS.get(name)
         if not ip:
