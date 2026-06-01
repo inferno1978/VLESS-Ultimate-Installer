@@ -5957,7 +5957,7 @@ def apply_dnscrypt_tuning() -> None:
         "cache":              "true",
         "cache_size":         "32768",
         "cache_min_ttl":      "300",
-        "lb_strategy":        "p2",
+        "lb_strategy":        "'p2'",
         "lb_estimator":       "true",
         "use_syslog":         "true",
     }
