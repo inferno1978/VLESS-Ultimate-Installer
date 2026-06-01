@@ -5788,7 +5788,7 @@ def install_dnscrypt() -> None:
         force_tcp = false
         ## Фиксируем быстрые резолверы. Для смены: Сеть → DNSCrypt → Выбор резолверов.
         {"server_names = [\"cloudflare\", \"cloudflare-ipv6\", \"google\", \"google-ipv6\"]" if IS_IPV6_AVAILABLE else "server_names = [\"cloudflare\", \"google\"]"}
-        lb_strategy = "p2"
+        lb_strategy = 'p2'
         lb_estimator = true
         timeout = 1500
         keepalive = 30
