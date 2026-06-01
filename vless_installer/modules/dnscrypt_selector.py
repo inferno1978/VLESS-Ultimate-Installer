@@ -225,120 +225,185 @@ def _measure_latency(resolver_name: str, port: int, timeout: float = 2.0) -> tup
     return resolver_name, 9999.0
 
 
+def _parse_resolver_ips_from_md() -> dict[str, tuple[str, list[int]]]:
+    """
+    Читает локальный кэш public-resolvers.md (скачанный dnscrypt-proxy)
+    и извлекает IP-адрес и порт для каждого резолвера из DNS stamp.
+
+    Формат файла:
+      ## имя-резолвера
+      ...описание...
+      sdns://AAABBB...  (один или несколько stamps)
+
+    DNS stamp — base64url-строка, содержащая протокол, IP и порт.
+    Протоколы: 0x01=DNSCrypt, 0x02=DoH, 0x03=DoT, 0x05=ODoH, 0x81=Relay.
+    """
+    import base64, struct
+
+    # Возможные пути к кэш-файлу
+    CACHE_PATHS = [
+        Path("/etc/dnscrypt-proxy/public-resolvers.md"),
+        Path("/var/cache/dnscrypt-proxy/public-resolvers.md"),
+        Path("/usr/local/etc/dnscrypt-proxy/public-resolvers.md"),
+    ]
+
+    md_content = None
+    for p in CACHE_PATHS:
+        if p.exists():
+            try:
+                md_content = p.read_text(encoding="utf-8", errors="replace")
+                break
+            except Exception:
+                pass
+
+    result: dict[str, tuple[str, list[int]]] = {}
+    if not md_content:
+        return result
+
+    def _decode_stamp(stamp_b64: str) -> tuple[str, int] | None:
+        """
+        Декодирует sdns:// stamp и возвращает (ip, port).
+        Возвращает None если не удалось распарсить.
+        """
+        try:
+            # base64url → bytes
+            pad = 4 - len(stamp_b64) % 4
+            if pad != 4:
+                stamp_b64 += "=" * pad
+            data = base64.urlsafe_b64decode(stamp_b64)
+            if len(data) < 10:
+                return None
+
+            proto = data[0]
+            # Все поддерживаемые протоколы имеют одинаковую структуру:
+            # [0]=proto [1..8]=props(8 байт) [9]=addr_len [10..]=addr
+            addr_len = data[9]
+            if len(data) < 10 + addr_len:
+                return None
+            addr_raw = data[10:10 + addr_len].decode("utf-8", errors="replace").strip()
+
+            if not addr_raw:
+                return None
+
+            # Разбираем addr: может быть "ip:port", "ip", "[ipv6]:port", "[ipv6]"
+            port = 443  # дефолт
+            ip = addr_raw
+
+            if addr_raw.startswith("["):
+                # IPv6 формат: [addr]:port или [addr]
+                bracket_end = addr_raw.find("]")
+                if bracket_end != -1:
+                    ip = addr_raw[1:bracket_end]
+                    rest = addr_raw[bracket_end + 1:]
+                    if rest.startswith(":"):
+                        try:
+                            port = int(rest[1:])
+                        except ValueError:
+                            pass
+            elif ":" in addr_raw:
+                # IPv4:port
+                parts = addr_raw.rsplit(":", 1)
+                ip = parts[0]
+                try:
+                    port = int(parts[1])
+                except ValueError:
+                    pass
+
+            if not ip:
+                return None
+
+            return ip, port
+        except Exception:
+            return None
+
+    # Порты по умолчанию для разных протоколов
+    PROTO_DEFAULT_PORTS = {
+        0x01: [443, 5353, 8443, 9953],  # DNSCrypt
+        0x02: [443],                     # DoH
+        0x03: [853, 443],                # DoT
+        0x05: [443],                     # ODoH
+        0x81: [443, 5353],               # DNSCrypt relay
+    }
+
+    current_name: str | None = None
+    stamps_for_name: list[tuple[str, int]] = []
+
+    def _flush(name: str, stamps: list[tuple[str, int]]) -> None:
+        """Сохраняет лучший IP/порты для резолвера."""
+        if not name or not stamps:
+            return
+        # Берём первый stamp — обычно основной сервер
+        ip, port = stamps[0]
+        # Собираем все порты (убираем дубли, сохраняем порядок)
+        ports_seen: list[int] = []
+        for _, p in stamps:
+            if p not in ports_seen:
+                ports_seen.append(p)
+        # Добавляем стандартные порты как fallback
+        for fallback in [443, 853, 5353, 8443, 9953]:
+            if fallback not in ports_seen:
+                ports_seen.append(fallback)
+        result[name] = (ip, ports_seen[:5])  # максимум 5 портов
+
+    for line in md_content.splitlines():
+        line = line.strip()
+
+        # Новый резолвер
+        if line.startswith("## "):
+            # Сохраняем предыдущий
+            if current_name is not None:
+                _flush(current_name, stamps_for_name)
+            current_name = line[3:].strip()
+            stamps_for_name = []
+            continue
+
+        # DNS stamp
+        if line.startswith("sdns://") and current_name:
+            stamp_b64 = line[7:]  # убираем "sdns://"
+            decoded = _decode_stamp(stamp_b64)
+            if decoded:
+                stamps_for_name.append(decoded)
+
+    # Последний резолвер в файле
+    if current_name is not None:
+        _flush(current_name, stamps_for_name)
+
+    return result
+
+
 def _measure_all_latency(resolvers: list[str], port: int) -> list[tuple[str, float]]:
     """
-    Параллельно замеряет latency для всех резолверов.
-    Временно применяет каждый резолвер, замеряет, возвращает список
-    (имя, мс) отсортированный по возрастанию.
+    Параллельно замеряет TCP latency для всех резолверов.
 
-    Поскольку DNSCrypt должен использовать конкретный резолвер для замера,
-    делаем замер через текущий порт DNSCrypt после временной смены server_names,
-    перезапуска и dig. Это долго — используем упрощённый метод:
-    измеряем RTT до bootstrap DNS (1.1.1.1) как прокси для latency резолвера,
-    плюс реальный dig через текущий DNSCrypt для финального теста.
+    IP-адреса берутся из локального кэша public-resolvers.md (DNS stamps),
+    что позволяет измерить latency для любого резолвера из списка,
+    а не только тех, что были захардкожены вручную.
     """
     import socket
 
+    # Строим карту IP из stamps файла (покрывает все резолверы)
+    stamp_ips = _parse_resolver_ips_from_md()
+    _log("INFO", f"Загружено IP из public-resolvers.md: {len(stamp_ips)} резолверов")
+
     def _ping_resolver(name: str) -> tuple[str, float]:
         """
-        TCP-пинг до резолвера. Пробует порты в порядке приоритета.
-        Разные резолверы слушают на разных портах:
-          DNSCrypt: обычно 443 или 8443
-          DoH:      443
-          DoT:      853
-          Quad9 DNSCrypt: 9953
-          CryptoStorm, Comss: 5353
+        TCP-пинг до резолвера.
+        IP и порты берём из DNS stamp, парсим из public-resolvers.md.
         """
-        # (ip, [порты в порядке приоритета])
-        KNOWN: dict[str, tuple[str, list[int]]] = {
-            # Cloudflare
-            "cloudflare":                         ("1.1.1.1",          [443, 853]),
-            "cloudflare-ipv6":                    ("2606:4700:4700::1111", [443]),
-            "cloudflare-security":                ("1.1.1.2",          [443, 853]),
-            "cloudflare-security-ipv6":           ("2606:4700:4700::1112", [443]),
-            "cloudflare-family":                  ("1.1.1.3",          [443, 853]),
-            "cloudflare-family-ipv6":             ("2606:4700:4700::1113", [443]),
-            # Google — DoH на 443, DoT на 853
-            "google":                             ("8.8.8.8",          [443, 853]),
-            "google-ipv6":                        ("2001:4860:4860::8888", [443, 853]),
-            # AdGuard
-            "adguard-dns":                        ("94.140.14.14",     [443, 853]),
-            "adguard-dns-ipv6":                   ("2a10:50c0::ad1:ff",[443]),
-            "adguard-dns-doh":                    ("94.140.14.14",     [443]),
-            "adguard-dns-family":                 ("94.140.14.15",     [443, 853]),
-            "adguard-dns-family-doh":             ("94.140.14.15",     [443]),
-            "adguard-dns-unfiltered":             ("94.140.14.140",    [443, 853]),
-            "adguard-dns-unfiltered-doh":         ("94.140.14.140",    [443]),
-            # Quad9 — DNSCrypt на 9953, DoH на 443
-            "quad9-dnscrypt-ip4-filter-pri":      ("9.9.9.9",          [9953, 443]),
-            "quad9-dnscrypt-ip4-nofilter-pri":    ("9.9.9.10",         [9953, 443]),
-            "quad9-dnscrypt-ip4-filter-alt":      ("149.112.112.9",    [9953, 443]),
-            "quad9-dnscrypt-ip4-nofilter-alt":    ("149.112.112.10",   [9953, 443]),
-            "quad9-doh-ip4-port443-filter-pri":   ("9.9.9.9",          [443]),
-            "quad9-doh-ip4-port443-nofilter-pri": ("9.9.9.10",         [443]),
-            # CleanBrowsing — DNSCrypt на 8443
-            "cleanbrowsing-adult":                ("185.228.168.10",   [8443, 443]),
-            "cleanbrowsing-family":               ("185.228.168.168",  [8443, 443]),
-            "cleanbrowsing-security":             ("185.228.168.9",    [8443, 443]),
-            "cleanbrowsing-adult-doh":            ("185.228.168.10",   [443]),
-            "cleanbrowsing-family-doh":           ("185.228.168.168",  [443]),
-            "cleanbrowsing-security-doh":         ("185.228.168.9",    [443]),
-            # OpenDNS
-            "opendns-familyshield":               ("208.67.222.123",   [443, 853]),
-            "opendns-familyshield-ipv6":          ("2620:119:35::123", [443]),
-            # Cisco Umbrella
-            "cisco-doh":                          ("208.67.222.222",   [443]),
-            # NextDNS
-            "nextdns":                            ("45.90.28.0",       [443, 853]),
-            "nextdns-doh":                        ("45.90.28.0",       [443]),
-            # Mullvad
-            "mullvad-doh":                        ("194.242.2.2",      [443]),
-            "mullvad-adblock-doh":                ("194.242.2.3",      [443]),
-            "mullvad-family-doh":                 ("194.242.2.4",      [443]),
-            "mullvad-extended-doh":               ("194.242.2.5",      [443]),
-            "mullvad-all-doh":                    ("194.242.2.9",      [443]),
-            # ControlD
-            "controld-block-malware":             ("76.76.2.1",        [443]),
-            "controld-unfiltered":                ("76.76.2.0",        [443]),
-            "controld-block-malware-doh":         ("76.76.2.1",        [443]),
-            # Comss.one (RU) — DNSCrypt на 5353
-            "comss.one":                          ("92.38.135.1",      [5353, 443]),
-            # DNS.SB
-            "dnssb-ipv4-a":                       ("185.222.222.222",  [443, 853]),
-            "dnssb-ipv4-b":                       ("45.11.45.11",      [443, 853]),
-            # a-and-a
-            "a-and-a":                            ("217.169.20.23",    [5353, 443]),
-            # Bortzmeyer
-            "bortzmeyer":                         ("193.70.85.11",     [8443, 443]),
-            "bortzmeyer-doh":                     ("193.70.85.11",     [443]),
-            # CipherDNS
-            "cipherdns-jb1-za":                   ("41.185.28.195",    [5353, 443]),
-            "cipherdns-jb1-doh-za":               ("41.185.28.195",    [443]),
-            # CS (CryptoStorm) — DNSCrypt на 5353
-            "cs-austria":                         ("5.9.164.112",      [5353, 443]),
-            "cs-barcelona":                       ("80.241.218.68",    [5353, 443]),
-            "cs-belgium":                         ("193.34.145.92",    [5353, 443]),
-            # Brahma World
-            "brahma-world":                       ("216.18.214.193",   [443, 5353]),
-            "brahma-world-ipv6":                  ("2602:fea7:d00::1", [443]),
-        }
-
-        entry = KNOWN.get(name)
+        entry = stamp_ips.get(name)
         if not entry:
-            # Неизвестный резолвер — пробуем стандартные порты
-            unknown_ports = [443, 853, 5353, 8443]
-            # Пробуем определить IP через системный резолвер
+            # Резолвер не найден в md-файле — недоступен для замера
             return name, 9999.0
 
         ip, ports = entry
         try:
             family = socket.AF_INET6 if ":" in ip else socket.AF_INET
-            for port in ports:
+            for p in ports:
                 try:
                     start = time.monotonic()
                     with socket.socket(family, socket.SOCK_STREAM) as s:
                         s.settimeout(2.0)
-                        s.connect((ip, port))
+                        s.connect((ip, p))
                     ms = (time.monotonic() - start) * 1000
                     return name, round(ms, 1)
                 except Exception:
@@ -348,26 +413,23 @@ def _measure_all_latency(resolvers: list[str], port: int) -> list[tuple[str, flo
         return name, 9999.0
 
     results: list[tuple[str, float]] = []
-    with ThreadPoolExecutor(max_workers=20) as ex:
+    with ThreadPoolExecutor(max_workers=30) as ex:
         futures = {ex.submit(_ping_resolver, name): name for name in resolvers}
         for future in as_completed(futures):
             results.append(future.result())
 
-    # Разделяем на известные (есть IP в KNOWN) и неизвестные
-    known_results   = [(n, ms) for n, ms in results if ms < 9999.0]
-    unknown_results = [(n, ms) for n, ms in results if ms >= 9999.0]
+    # Сортируем: сначала доступные по latency, потом недоступные
+    reachable   = sorted([(n, ms) for n, ms in results if ms < 9999.0], key=lambda x: x[1])
+    unreachable = [(n, ms) for n, ms in results if ms >= 9999.0]
 
-    # Неизвестные резолверы — сохраняем порядок из -sort rtt (он уже по latency)
-    # Присваиваем им условный latency чтобы они шли после известных
-    unknown_ordered = []
-    known_names = {n for n, _ in known_results}
+    # Сохраняем порядок -sort rtt для недоступных (они были упорядочены dnscrypt-proxy)
+    unreachable_ordered = []
+    reachable_names = {n for n, _ in reachable}
     for name in resolvers:
-        if name not in known_names:
-            unknown_ordered.append((name, 5000.0))  # условный latency
+        if name not in reachable_names:
+            unreachable_ordered.append((name, 9999.0))
 
-    # Итоговый список: известные по реальному pong, неизвестные в порядке rtt
-    combined = sorted(known_results, key=lambda x: x[1]) + unknown_ordered
-    return combined
+    return reachable + unreachable_ordered
 
 
 def _get_dnscrypt_port() -> int:
@@ -454,13 +516,9 @@ def _show_page(top: list[str], page: int, current: list[str], sorted_by_rtt: boo
         marker  = f" {GREEN}← текущий{NC}" if name in current else ""
         num     = f"{i + 1:>3}."
         ms      = (latency_map or {}).get(name)
-        if ms is not None and ms < 9999.0 and ms != 5000.0:
+        if ms is not None and ms < 9999.0:
             lat_color = GREEN if ms < 50 else YELLOW if ms < 150 else RED
             lat_str   = f"  {lat_color}{ms:.0f} мс{NC}"
-        elif ms == 5000.0:
-            # Резолвер из пула dnscrypt — latency не измерялась напрямую,
-            # но dnscrypt-proxy -sort rtt поставил его сюда
-            lat_str = f"  {DIM}(в пуле){NC}"
         elif ms is not None and ms >= 9999.0:
             lat_str = f"  {DIM}недоступен{NC}"
         else:
@@ -540,25 +598,20 @@ def do_dnscrypt_selector_menu() -> None:
     latency_map: dict = {}
 
     # Замеряем latency для известных резолверов параллельно
-    _info(f"Замеряю latency для {len(top_all)} резолверов (параллельно, ~15-30 сек)...")
+    _info(f"Замеряю TCP latency для {len(top_all)} резолверов (параллельно, ~10-20 сек)...")
     print()
     measured = _measure_all_latency(top_all, _get_dnscrypt_port())
 
-    # measured содержит:
-    #   - известные резолверы (из KNOWN_IPS) с реальным pong в мс
-    #   - неизвестные с 5000.0 (сохраняют порядок из -sort rtt)
-    known_with_ms   = [(n, ms) for n, ms in measured if ms < 9999.0 and ms != 5000.0]
-    unknown_in_pool = [(n, ms) for n, ms in measured if ms == 5000.0]
-    unreachable     = [(n, ms) for n, ms in measured if ms >= 9999.0 and ms != 5000.0]
+    # measured содержит все резолверы с реальным TCP latency:
+    #   - доступные: реальный pong в мс
+    #   - недоступные: 9999.0
+    reachable   = [(n, ms) for n, ms in measured if ms < 9999.0]
+    unreachable = [(n, ms) for n, ms in measured if ms >= 9999.0]
 
-    if known_with_ms or unknown_in_pool:
+    if reachable or unreachable:
         sorted_by_rtt = True
-        # Порядок: сначала известные по реальному pong,
-        # затем неизвестные в порядке dnscrypt -sort rtt,
-        # в конце недоступные
         top = (
-            [n for n, _ in sorted(known_with_ms, key=lambda x: x[1])]
-            + [n for n, _ in unknown_in_pool]
+            [n for n, _ in reachable]   # уже отсортированы по latency
             + [n for n, _ in unreachable]
         )
         latency_map = {n: ms for n, ms in measured}
