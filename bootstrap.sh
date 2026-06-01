@@ -5,6 +5,10 @@
 # ============================================================
 set -euo pipefail
 
+# Сброс системного прокси перед загрузкой — защита от сломанных окружений,
+# когда в /etc/environment прописан прокси на несуществующий локальный порт.
+unset ALL_PROXY all_proxy HTTP_PROXY http_proxy HTTPS_PROXY https_proxy 2>/dev/null || true
+
 RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'
 CYAN='\033[0;36m'; BOLD='\033[1m'; DIM='\033[2m'; NC='\033[0m'
 
