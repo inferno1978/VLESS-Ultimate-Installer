@@ -99,11 +99,47 @@ def _fetch_resolver_list() -> tuple[list[str], bool]:
     import tempfile, shutil
 
     def _parse_names(stdout: str) -> list[str]:
+        """
+        Парсит вывод dnscrypt-proxy -list / -list -sort rtt.
+
+        Форматы которые встречаются в реальном выводе:
+          Простой -list:
+            google
+            cloudflare
+            adguard-dns
+
+          -list с -sort rtt (новые версии):
+            cloudflare          1.1.1.1    2ms
+            google              8.8.8.8    5ms
+            adguard-dns         94.140.14.14  43ms
+
+          Подробный -list (старые версии):
+            [NOTICE] DNSCrypt, port 443, 'google' ...
+
+          -list 2>/dev/null (stderr отфильтрован):
+            google
+            cloudflare  [no stamp]
+
+        Правило: первое слово строки без скобок — это имя резолвера.
+        """
         names = []
+        seen = set()
         for line in stdout.splitlines():
             line = line.strip()
-            if line and not line.startswith("[") and " " not in line:
-                names.append(line)
+            if not line:
+                continue
+            # Пропускаем строки systemd/journald и служебные
+            if line.startswith("[") or line.startswith("#"):
+                continue
+            # Берём первое слово — это всегда имя резолвера
+            name = line.split()[0]
+            # Имя не должно быть IP-адресом или числом
+            if re.match(r'^\d', name):
+                continue
+            # Не дублируем
+            if name not in seen:
+                seen.add(name)
+                names.append(name)
         return names
 
     # Создаём временный конфиг без server_names — чтобы видеть весь пул
@@ -182,94 +218,112 @@ def _measure_all_latency(resolvers: list[str], port: int) -> list[tuple[str, flo
     import socket
 
     def _ping_resolver(name: str) -> tuple[str, float]:
-        """Быстрый TCP-пинг до резолвера по имени через публичный IP."""
-        # Маппинг известных резолверов на их IP
-        KNOWN_IPS: dict[str, str] = {
+        """
+        TCP-пинг до резолвера. Пробует порты в порядке приоритета.
+        Разные резолверы слушают на разных портах:
+          DNSCrypt: обычно 443 или 8443
+          DoH:      443
+          DoT:      853
+          Quad9 DNSCrypt: 9953
+          CryptoStorm, Comss: 5353
+        """
+        # (ip, [порты в порядке приоритета])
+        KNOWN: dict[str, tuple[str, list[int]]] = {
             # Cloudflare
-            "cloudflare":                        "1.1.1.1",
-            "cloudflare-ipv6":                   "2606:4700:4700::1111",
-            "cloudflare-security":               "1.1.1.2",
-            "cloudflare-security-ipv6":          "2606:4700:4700::1112",
-            "cloudflare-family":                 "1.1.1.3",
-            "cloudflare-family-ipv6":            "2606:4700:4700::1113",
-            # Google
-            "google":                            "8.8.8.8",
-            "google-ipv6":                       "2001:4860:4860::8888",
+            "cloudflare":                         ("1.1.1.1",          [443, 853]),
+            "cloudflare-ipv6":                    ("2606:4700:4700::1111", [443]),
+            "cloudflare-security":                ("1.1.1.2",          [443, 853]),
+            "cloudflare-security-ipv6":           ("2606:4700:4700::1112", [443]),
+            "cloudflare-family":                  ("1.1.1.3",          [443, 853]),
+            "cloudflare-family-ipv6":             ("2606:4700:4700::1113", [443]),
+            # Google — DoH на 443, DoT на 853
+            "google":                             ("8.8.8.8",          [443, 853]),
+            "google-ipv6":                        ("2001:4860:4860::8888", [443, 853]),
             # AdGuard
-            "adguard-dns":                       "94.140.14.14",
-            "adguard-dns-ipv6":                  "2a10:50c0::ad1:ff",
-            "adguard-dns-doh":                   "94.140.14.14",
-            "adguard-dns-family":                "94.140.14.15",
-            "adguard-dns-family-doh":            "94.140.14.15",
-            "adguard-dns-unfiltered":            "94.140.14.140",
-            "adguard-dns-unfiltered-doh":        "94.140.14.140",
-            # Quad9
-            "quad9-dnscrypt-ip4-filter-pri":     "9.9.9.9",
-            "quad9-dnscrypt-ip4-nofilter-pri":   "9.9.9.10",
-            "quad9-dnscrypt-ip4-filter-alt":     "149.112.112.9",
-            "quad9-dnscrypt-ip4-nofilter-alt":   "149.112.112.10",
-            "quad9-doh-ip4-port443-filter-pri":  "9.9.9.9",
-            "quad9-doh-ip4-port443-nofilter-pri":"9.9.9.10",
-            # CleanBrowsing
-            "cleanbrowsing-adult":               "185.228.168.10",
-            "cleanbrowsing-family":              "185.228.168.168",
-            "cleanbrowsing-security":            "185.228.168.9",
-            "cleanbrowsing-adult-doh":           "185.228.168.10",
-            "cleanbrowsing-family-doh":          "185.228.168.168",
-            "cleanbrowsing-security-doh":        "185.228.168.9",
+            "adguard-dns":                        ("94.140.14.14",     [443, 853]),
+            "adguard-dns-ipv6":                   ("2a10:50c0::ad1:ff",[443]),
+            "adguard-dns-doh":                    ("94.140.14.14",     [443]),
+            "adguard-dns-family":                 ("94.140.14.15",     [443, 853]),
+            "adguard-dns-family-doh":             ("94.140.14.15",     [443]),
+            "adguard-dns-unfiltered":             ("94.140.14.140",    [443, 853]),
+            "adguard-dns-unfiltered-doh":         ("94.140.14.140",    [443]),
+            # Quad9 — DNSCrypt на 9953, DoH на 443
+            "quad9-dnscrypt-ip4-filter-pri":      ("9.9.9.9",          [9953, 443]),
+            "quad9-dnscrypt-ip4-nofilter-pri":    ("9.9.9.10",         [9953, 443]),
+            "quad9-dnscrypt-ip4-filter-alt":      ("149.112.112.9",    [9953, 443]),
+            "quad9-dnscrypt-ip4-nofilter-alt":    ("149.112.112.10",   [9953, 443]),
+            "quad9-doh-ip4-port443-filter-pri":   ("9.9.9.9",          [443]),
+            "quad9-doh-ip4-port443-nofilter-pri": ("9.9.9.10",         [443]),
+            # CleanBrowsing — DNSCrypt на 8443
+            "cleanbrowsing-adult":                ("185.228.168.10",   [8443, 443]),
+            "cleanbrowsing-family":               ("185.228.168.168",  [8443, 443]),
+            "cleanbrowsing-security":             ("185.228.168.9",    [8443, 443]),
+            "cleanbrowsing-adult-doh":            ("185.228.168.10",   [443]),
+            "cleanbrowsing-family-doh":           ("185.228.168.168",  [443]),
+            "cleanbrowsing-security-doh":         ("185.228.168.9",    [443]),
             # OpenDNS
-            "opendns-familyshield":              "208.67.222.123",
-            "opendns-familyshield-ipv6":         "2620:119:35::123",
+            "opendns-familyshield":               ("208.67.222.123",   [443, 853]),
+            "opendns-familyshield-ipv6":          ("2620:119:35::123", [443]),
             # Cisco Umbrella
-            "cisco-doh":                         "208.67.222.222",
+            "cisco-doh":                          ("208.67.222.222",   [443]),
             # NextDNS
-            "nextdns":                           "45.90.28.0",
-            "nextdns-doh":                       "45.90.28.0",
+            "nextdns":                            ("45.90.28.0",       [443, 853]),
+            "nextdns-doh":                        ("45.90.28.0",       [443]),
             # Mullvad
-            "mullvad-doh":                       "194.242.2.2",
-            "mullvad-adblock-doh":               "194.242.2.3",
-            "mullvad-family-doh":                "194.242.2.4",
-            "mullvad-extended-doh":              "194.242.2.5",
-            "mullvad-all-doh":                   "194.242.2.9",
+            "mullvad-doh":                        ("194.242.2.2",      [443]),
+            "mullvad-adblock-doh":                ("194.242.2.3",      [443]),
+            "mullvad-family-doh":                 ("194.242.2.4",      [443]),
+            "mullvad-extended-doh":               ("194.242.2.5",      [443]),
+            "mullvad-all-doh":                    ("194.242.2.9",      [443]),
             # ControlD
-            "controld-block-malware":            "76.76.2.1",
-            "controld-unfiltered":               "76.76.2.0",
-            "controld-block-malware-doh":        "76.76.2.1",
-            # Comss.one (RU)
-            "comss.one":                         "92.38.135.1",
+            "controld-block-malware":             ("76.76.2.1",        [443]),
+            "controld-unfiltered":                ("76.76.2.0",        [443]),
+            "controld-block-malware-doh":         ("76.76.2.1",        [443]),
+            # Comss.one (RU) — DNSCrypt на 5353
+            "comss.one":                          ("92.38.135.1",      [5353, 443]),
             # DNS.SB
-            "dnssb-ipv4-a":                      "185.222.222.222",
-            "dnssb-ipv4-b":                      "45.11.45.11",
+            "dnssb-ipv4-a":                       ("185.222.222.222",  [443, 853]),
+            "dnssb-ipv4-b":                       ("45.11.45.11",      [443, 853]),
             # a-and-a
-            "a-and-a":                           "217.169.20.23",
+            "a-and-a":                            ("217.169.20.23",    [5353, 443]),
             # Bortzmeyer
-            "bortzmeyer":                        "193.70.85.11",
-            "bortzmeyer-doh":                    "193.70.85.11",
+            "bortzmeyer":                         ("193.70.85.11",     [8443, 443]),
+            "bortzmeyer-doh":                     ("193.70.85.11",     [443]),
             # CipherDNS
-            "cipherdns-jb1-za":                  "41.185.28.195",
-            "cipherdns-jb1-doh-za":              "41.185.28.195",
-            # CS (CryptoStorm)
-            "cs-austria":                        "5.9.164.112",
-            "cs-barcelona":                      "80.241.218.68",
-            "cs-belgium":                        "193.34.145.92",
+            "cipherdns-jb1-za":                   ("41.185.28.195",    [5353, 443]),
+            "cipherdns-jb1-doh-za":               ("41.185.28.195",    [443]),
+            # CS (CryptoStorm) — DNSCrypt на 5353
+            "cs-austria":                         ("5.9.164.112",      [5353, 443]),
+            "cs-barcelona":                       ("80.241.218.68",    [5353, 443]),
+            "cs-belgium":                         ("193.34.145.92",    [5353, 443]),
             # Brahma World
-            "brahma-world":                      "216.18.214.193",
-            "brahma-world-ipv6":                 "2602:fea7:d00::1",
+            "brahma-world":                       ("216.18.214.193",   [443, 5353]),
+            "brahma-world-ipv6":                  ("2602:fea7:d00::1", [443]),
         }
-        ip = KNOWN_IPS.get(name)
-        if not ip:
-            # Для неизвестных — пробуем через dnscrypt-proxy -list с именем
+
+        entry = KNOWN.get(name)
+        if not entry:
+            # Неизвестный резолвер — пробуем стандартные порты
+            unknown_ports = [443, 853, 5353, 8443]
+            # Пробуем определить IP через системный резолвер
             return name, 9999.0
+
+        ip, ports = entry
         try:
             family = socket.AF_INET6 if ":" in ip else socket.AF_INET
-            start = time.monotonic()
-            with socket.socket(family, socket.SOCK_STREAM) as s:
-                s.settimeout(2.0)
-                s.connect((ip, 443))
-            ms = (time.monotonic() - start) * 1000
-            return name, round(ms, 1)
+            for port in ports:
+                try:
+                    start = time.monotonic()
+                    with socket.socket(family, socket.SOCK_STREAM) as s:
+                        s.settimeout(2.0)
+                        s.connect((ip, port))
+                    ms = (time.monotonic() - start) * 1000
+                    return name, round(ms, 1)
+                except Exception:
+                    continue
         except Exception:
-            return name, 9999.0
+            pass
+        return name, 9999.0
 
     results: list[tuple[str, float]] = []
     with ThreadPoolExecutor(max_workers=20) as ex:
