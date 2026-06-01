@@ -353,8 +353,21 @@ def _measure_all_latency(resolvers: list[str], port: int) -> list[tuple[str, flo
         for future in as_completed(futures):
             results.append(future.result())
 
-    results.sort(key=lambda x: x[1])
-    return results
+    # Разделяем на известные (есть IP в KNOWN) и неизвестные
+    known_results   = [(n, ms) for n, ms in results if ms < 9999.0]
+    unknown_results = [(n, ms) for n, ms in results if ms >= 9999.0]
+
+    # Неизвестные резолверы — сохраняем порядок из -sort rtt (он уже по latency)
+    # Присваиваем им условный latency чтобы они шли после известных
+    unknown_ordered = []
+    known_names = {n for n, _ in known_results}
+    for name in resolvers:
+        if name not in known_names:
+            unknown_ordered.append((name, 5000.0))  # условный latency
+
+    # Итоговый список: известные по реальному pong, неизвестные в порядке rtt
+    combined = sorted(known_results, key=lambda x: x[1]) + unknown_ordered
+    return combined
 
 
 def _get_dnscrypt_port() -> int:
@@ -441,10 +454,14 @@ def _show_page(top: list[str], page: int, current: list[str], sorted_by_rtt: boo
         marker  = f" {GREEN}← текущий{NC}" if name in current else ""
         num     = f"{i + 1:>3}."
         ms      = (latency_map or {}).get(name)
-        if ms is not None and ms < 9999.0:
+        if ms is not None and ms < 9999.0 and ms != 5000.0:
             lat_color = GREEN if ms < 50 else YELLOW if ms < 150 else RED
             lat_str   = f"  {lat_color}{ms:.0f} мс{NC}"
-        elif ms is not None:
+        elif ms == 5000.0:
+            # Резолвер из пула dnscrypt — latency не измерялась напрямую,
+            # но dnscrypt-proxy -sort rtt поставил его сюда
+            lat_str = f"  {DIM}(в пуле){NC}"
+        elif ms is not None and ms >= 9999.0:
             lat_str = f"  {DIM}недоступен{NC}"
         else:
             lat_str = ""
@@ -522,20 +539,28 @@ def do_dnscrypt_selector_menu() -> None:
     top_all = resolvers[:_TOP_N]
     latency_map: dict = {}
 
-    # Замеряем latency параллельно
+    # Замеряем latency для известных резолверов параллельно
     _info(f"Замеряю latency для {len(top_all)} резолверов (параллельно, ~15-30 сек)...")
     print()
     measured = _measure_all_latency(top_all, _get_dnscrypt_port())
 
-    # Разделяем на доступные и недоступные
-    available   = [(n, ms) for n, ms in measured if ms < 9999.0]
-    unavailable = [(n, ms) for n, ms in measured if ms >= 9999.0]
+    # measured содержит:
+    #   - известные резолверы (из KNOWN_IPS) с реальным pong в мс
+    #   - неизвестные с 5000.0 (сохраняют порядок из -sort rtt)
+    known_with_ms   = [(n, ms) for n, ms in measured if ms < 9999.0 and ms != 5000.0]
+    unknown_in_pool = [(n, ms) for n, ms in measured if ms == 5000.0]
+    unreachable     = [(n, ms) for n, ms in measured if ms >= 9999.0 and ms != 5000.0]
 
-    if available:
+    if known_with_ms or unknown_in_pool:
         sorted_by_rtt = True
-        # Топ по latency — только доступные, потом недоступные
-        top = [n for n, _ in available] + [n for n, _ in unavailable]
-        # Сохраняем latency для отображения
+        # Порядок: сначала известные по реальному pong,
+        # затем неизвестные в порядке dnscrypt -sort rtt,
+        # в конце недоступные
+        top = (
+            [n for n, _ in sorted(known_with_ms, key=lambda x: x[1])]
+            + [n for n, _ in unknown_in_pool]
+            + [n for n, _ in unreachable]
+        )
         latency_map = {n: ms for n, ms in measured}
     else:
         sorted_by_rtt = False
