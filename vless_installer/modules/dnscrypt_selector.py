@@ -587,7 +587,7 @@ def _show_page(top: list[str], page: int, current: list[str], sorted_by_rtt: boo
 
         # Время отклика + маркер «текущий»
         is_current = name in current
-        marker = f" {GREEN}←{NC}" if is_current else ""
+        marker = f" {GREEN}← текущий{NC}" if is_current else ""
         if ms is not None and ms < 9999.0:
             lat_color = GREEN if ms < 50 else YELLOW if ms < 150 else RED
             ms_text   = f"{lat_color}{ms:.0f} мс{NC}{marker}"
