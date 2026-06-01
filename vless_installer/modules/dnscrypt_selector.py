@@ -536,31 +536,42 @@ def _show_page(top: list[str], page: int, current: list[str], sorted_by_rtt: boo
         _box_row(f"{prefix}{DIM}{ln}{NC}")
     _box_line_sep()
 
-    # ── Заголовок колонок таблицы ──────────────────────────────────────────
-    # Колонки: №(5) | Резолвер(динамически) | Время отклика(фиксировано)
-    COL_NUM     = 5    # "  99."
-    COL_LAT     = 16   # " 999 мс ← текущий"  (с запасом на маркер)
-    COL_NAME    = _BOX_W - COL_NUM - COL_LAT - 4  # 4 = разделители " │ "×2
+    # ── Колонки ────────────────────────────────────────────────────────────
+    # Структура строки (всё считается в видимых символах через _wcslen):
+    #   " NNN.  Имя-резолвера...........  99 мс ←"
+    #   COL_NUM=5  пробел  COL_NAME(auto)  пробел  COL_LAT=14
+    # Разделителей │ нет — они ломаются из-за ANSI при расчёте padding в _box_row.
+    COL_NUM  = 5   # "  99." — всегда 5 видимых символов
+    COL_LAT  = 14  # "999 мс ←" — 14 видимых символов с запасом
+    # COL_NAME: всё оставшееся место внутри рамки
+    # Формула: _BOX_W = 1(лев.пробел) + COL_NUM + 2(пробелы) + COL_NAME + 2(пробелы) + COL_LAT
+    COL_NAME = _BOX_W - 1 - COL_NUM - 2 - 2 - COL_LAT
     if COL_NAME < 20:
         COL_NAME = 20
 
-    hdr_num  = f"{DIM}{'  №':<{COL_NUM}}{NC}"
-    hdr_name = f"{DIM}{'Резолвер':<{COL_NAME}}{NC}"
-    hdr_lat  = f"{DIM}{'Время отклика':>{COL_LAT}}{NC}"
-    sep_char = f"{DIM}│{NC}"
-    _box_row(f" {hdr_num} {sep_char} {hdr_name} {sep_char} {hdr_lat}")
+    def _pad_right(text_with_ansi: str, width: int) -> str:
+        """Дополняет строку пробелами справа до видимой ширины width."""
+        visible = _wcslen(text_with_ansi)
+        pad = width - visible
+        return text_with_ansi + (" " * max(0, pad))
 
-    # Линия-разделитель под шапкой колонок (─── внутри рамки)
-    inner_sep = (
-        f" {DIM}"
-        + "─" * (COL_NUM + 1)
-        + "┼"
-        + "─" * (COL_NAME + 2)
-        + "┼"
-        + "─" * (COL_LAT + 1)
-        + f"{NC}"
+    def _pad_left(text_with_ansi: str, width: int) -> str:
+        """Дополняет строку пробелами слева до видимой ширины width."""
+        visible = _wcslen(text_with_ansi)
+        pad = width - visible
+        return (" " * max(0, pad)) + text_with_ansi
+
+    # Шапка колонок
+    hdr = (
+        f" {_pad_right(f'{DIM}  №{NC}', COL_NUM)}"
+        f"  {_pad_right(f'{DIM}Резолвер{NC}', COL_NAME)}"
+        f"  {_pad_left(f'{DIM}Время отклика{NC}', COL_LAT)}"
     )
-    _box_row(inner_sep)
+    _box_row(hdr)
+
+    # Горизонтальный разделитель под шапкой — сплошная линия ─── без ┼
+    sep_line = f" {DIM}" + "─" * (_BOX_W - 1) + f"{NC}"
+    _box_row(sep_line)
 
     # ── Строки резолверов ──────────────────────────────────────────────────
     for i in range(start, end):
@@ -568,35 +579,25 @@ def _show_page(top: list[str], page: int, current: list[str], sorted_by_rtt: boo
         ms   = (latency_map or {}).get(name)
 
         # Номер
-        num_str = f"{i + 1:>3}."
+        num_col = _pad_right(f"{WHITE}{i + 1:>3}.{NC}", COL_NUM)
+
+        # Имя резолвера — обрезаем если не влезает (по видимой длине)
+        plain_name = name if len(name) <= COL_NAME else name[:COL_NAME - 1] + "…"
+        name_col = _pad_right(f"{CYAN}{plain_name}{NC}", COL_NAME)
 
         # Время отклика + маркер «текущий»
         is_current = name in current
+        marker = f" {GREEN}←{NC}" if is_current else ""
         if ms is not None and ms < 9999.0:
             lat_color = GREEN if ms < 50 else YELLOW if ms < 150 else RED
-            ms_part   = f"{lat_color}{ms:.0f} мс{NC}"
+            ms_text   = f"{lat_color}{ms:.0f} мс{NC}{marker}"
         elif ms is not None:
-            ms_part = f"{DIM}недоступен{NC}"
+            ms_text = f"{DIM}недоступен{NC}{marker}"
         else:
-            ms_part = f"{DIM}—{NC}"
+            ms_text = f"{DIM}—{NC}{marker}"
+        lat_col = _pad_left(ms_text, COL_LAT)
 
-        marker = f" {GREEN}←{NC}" if is_current else ""
-
-        # Имя резолвера — обрезаем если не влезает
-        plain_name = name
-        if len(plain_name) > COL_NAME:
-            plain_name = plain_name[:COL_NAME - 1] + "…"
-        name_col = f"{CYAN}{plain_name:<{COL_NAME}}{NC}"
-
-        # Правая колонка: выравниваем время вправо внутри COL_LAT
-        # Считаем видимую ширину ms_part + marker
-        ms_visible = _wcslen(_plain(ms_part) + _plain(marker))
-        rpad = COL_LAT - ms_visible
-        if rpad < 0:
-            rpad = 0
-        lat_col = f"{' ' * rpad}{ms_part}{marker}"
-
-        _box_row(f" {WHITE}{num_str}{NC} {sep_char} {name_col} {sep_char} {lat_col}")
+        _box_row(f" {num_col}  {name_col}  {lat_col}")
 
     # ── Навигация ──────────────────────────────────────────────────────────
     _box_line_sep()
