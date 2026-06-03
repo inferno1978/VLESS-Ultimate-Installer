@@ -15447,6 +15447,11 @@ def _users_apply_to_config(users: list[dict]) -> bool:
     Основной конфиг — CONFIG_DIR/config.json; /usr/local/etc/xray/config.json
     в режиме B является симлинком и пишется автоматически через него.
     """
+    # Xray падает с "failed to build inbound" если clients пуст.
+    # Если все пользователи отключены — добавляем placeholder с невалидным UUID,
+    # чтобы inbound оставался рабочим, но реально никто не мог подключиться.
+    _PLACEHOLDER_UUID = "00000000-0000-0000-0000-000000000000"
+    effective_users = users if users else [{"uuid": _PLACEHOLDER_UUID, "email": "disabled@placeholder"}]
     written: set = set()
     # CONFIG_DIR первичен; /usr/local/etc может быть симлинком — пишем один раз
     for cfg_path in (CONFIG_DIR / "config.json",
@@ -15472,7 +15477,7 @@ def _users_apply_to_config(users: list[dict]) -> bool:
                 # flow только для REALITY inbound, не для xHTTP
                 use_flow = (proto == "vless" and "realitySettings" in st)
                 clients = []
-                for u in users:
+                for u in effective_users:
                     client: dict = {"id": u["uuid"]}
                     if u.get("email"):
                         client["email"] = u["email"]
@@ -15821,14 +15826,19 @@ def _unified_load_users() -> list[dict]:
                 uid = u.get("uuid", "")
                 if uid and uid not in seen_uuids:
                     seen_uuids.add(uid)
-                    merged.append({
+                    entry: dict = {
                         "uuid":         uid,
                         "email":        u.get("email", f"{u.get('name','user')}@xray"),
                         "name":         u.get("name", u.get("email", "user")),
                         "created":      u.get("created", ""),
                         "source":       u.get("source", "B"),
-                        "device_label": u.get("device_label", ""),  # сохраняем метку
-                    })
+                        "device_label": u.get("device_label", ""),
+                    }
+                    # Сохраняем флаг отключения — без него статус всегда [акт]
+                    if u.get("disabled"):
+                        entry["disabled"]    = True
+                        entry["disabled_at"] = u.get("disabled_at", "")
+                    merged.append(entry)
         except Exception:
             pass
 
@@ -15868,15 +15878,22 @@ def _unified_save_users(users: list[dict]) -> None:
     — xray config.json inbound clients (все реальные копии конфига)
     Симлинки пропускаются — записываем только в реальные файлы.
     """
-    # Сохраняем в users.json — включая device_label и source
-    _users_save([{
-        "uuid":         u["uuid"],
-        "email":        u["email"],
-        "name":         u.get("name", u["email"].split("@")[0]),
-        "created":      u.get("created", datetime.now(timezone.utc).isoformat()),
-        "source":       u.get("source", "A"),
-        "device_label": u.get("device_label", ""),  # метка устройства
-    } for u in users])
+    # Сохраняем в users.json — включая device_label, source и флаг отключения
+    _save_list = []
+    for u in users:
+        rec = {
+            "uuid":         u["uuid"],
+            "email":        u["email"],
+            "name":         u.get("name", u["email"].split("@")[0]),
+            "created":      u.get("created", datetime.now(timezone.utc).isoformat()),
+            "source":       u.get("source", "A"),
+            "device_label": u.get("device_label", ""),
+        }
+        if u.get("disabled"):
+            rec["disabled"]    = True
+            rec["disabled_at"] = u.get("disabled_at", "")
+        _save_list.append(rec)
+    _users_save(_save_list)
 
     # Синхронизируем в xray config.json.
     # Основной конфиг — CONFIG_DIR/config.json (/etc/xray/config.json),
