@@ -384,6 +384,12 @@ def _xray_stats_blocks() -> dict:
             "services": ["StatsService", "HandlerService"],
         },
         "policy": {
+            "levels": {
+                "0": {
+                    "statsUserUplink":   True,
+                    "statsUserDownlink": True,
+                },
+            },
             "system": {
                 "statsOutboundUplink":   True,
                 "statsOutboundDownlink": True,
@@ -415,11 +421,17 @@ def _apply_stats_to_config(config: dict) -> None:
     config.setdefault("api",   blocks["api"])
     # policy.system — мержим принудительно, чтобы statsUser* всегда попадали
     # даже если секция policy уже существует (setdefault её не обновит)
-    policy_sys = config.setdefault("policy", {}).setdefault("system", {})
+    policy_dict = config.setdefault("policy", {})
+    policy_sys = policy_dict.setdefault("system", {})
     policy_sys["statsOutboundUplink"]   = True
     policy_sys["statsOutboundDownlink"] = True
     policy_sys["statsUserUplink"]       = True
     policy_sys["statsUserDownlink"]     = True
+    # policy.levels."0" — без этого xray не считает трафик пользователей,
+    # т.к. все соединения проходят через level 0, где сбор должен быть включён явно
+    policy_lvl0 = policy_dict.setdefault("levels", {}).setdefault("0", {})
+    policy_lvl0["statsUserUplink"]   = True
+    policy_lvl0["statsUserDownlink"] = True
 
     # Inbound — добавляем только если ещё нет с таким тегом
     inbound = blocks["_stats_inbound"]
@@ -27263,13 +27275,16 @@ def do_patch_stats_api() -> None:
         try:
             cfg = json.loads(cfg_path.read_text())
             _apply_stats_to_config(cfg)
-            # Явно гарантируем statsUser* — _apply_stats_to_config использует setdefault,
-            # поэтому если policy уже была без statsUser — обновляем вручную
-            policy_sys = cfg.setdefault("policy", {}).setdefault("system", {})
+            # Явно гарантируем statsUser* и levels."0" — без обоих xray не считает трафик
+            policy_dict_patch = cfg.setdefault("policy", {})
+            policy_sys = policy_dict_patch.setdefault("system", {})
             policy_sys["statsOutboundUplink"]   = True
             policy_sys["statsOutboundDownlink"] = True
             policy_sys["statsUserUplink"]       = True
             policy_sys["statsUserDownlink"]     = True
+            policy_lvl0 = policy_dict_patch.setdefault("levels", {}).setdefault("0", {})
+            policy_lvl0["statsUserUplink"]   = True
+            policy_lvl0["statsUserDownlink"] = True
             cfg_path.write_text(json.dumps(cfg, indent=2, ensure_ascii=False))
             _set_config_owner(cfg_path)
             _box_ok(f"Патч применён: {cfg_path}")
