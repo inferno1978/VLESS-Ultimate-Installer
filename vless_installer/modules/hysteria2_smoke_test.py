@@ -39,6 +39,11 @@ from vless_installer.modules.hysteria2_common import (
     _is_ipv6,
     H2_SERVICE, H2_CONFIG_FILE, H2_CERT_FILE, H2_KEY_FILE,
 )
+from vless_installer.modules.box_renderer import (
+    _box_top, _box_row, _box_item, _box_item_exit, _box_sep,
+    _box_bottom, _box_back,
+)
+
 from vless_installer.modules.hysteria2_health import _quic_ping
 
 _OK  = f"{GREEN}✓{NC}"
@@ -166,10 +171,7 @@ def h2_smoke_test(verbose: bool = True) -> bool:
                                       f"{rtt6}ms" if rtt6 else "timeout")
         else:
             print(f"  {_SKP} IPv6 ноды не настроены — пропущено")
-from vless_installer.modules.box_renderer import (
-    _box_top, _box_row, _box_item, _box_item_exit, _box_sep,
-    _box_bottom, _box_back,
-)
+
 
 
     # ── Итог ─────────────────────────────────────────────────────────────────

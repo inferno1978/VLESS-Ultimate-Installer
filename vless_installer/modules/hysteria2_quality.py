@@ -34,6 +34,11 @@ from vless_installer.modules.hysteria2_common import (
     _tg_h2_event, _tg_send, _is_ipv6,
     H2_CONFIG_FILE,
 )
+from vless_installer.modules.box_renderer import (
+    _box_top, _box_row, _box_item, _box_item_exit, _box_sep,
+    _box_bottom, _box_back,
+)
+
 from vless_installer.modules.hysteria2_health import _quic_ping_multi
 
 _HISTORY_FILE = Path("/var/lib/xray-installer/h2_quality_history.json")
@@ -333,6 +338,7 @@ def do_h2_quality_menu() -> None:
             break
         else:
             time.sleep(0.5)
+
 
 
 

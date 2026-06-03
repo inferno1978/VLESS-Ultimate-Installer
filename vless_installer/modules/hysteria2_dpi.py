@@ -35,6 +35,11 @@ from vless_installer.modules.hysteria2_common import (
     open_udp_ports, close_udp_ports, _detect_ipv6_available,
     H2_SERVICE, H2_CONFIG_FILE,
 )
+from vless_installer.modules.box_renderer import (
+    _box_top, _box_row, _box_item, _box_item_exit, _box_sep,
+    _box_bottom, _box_back,
+)
+
 from vless_installer.modules.hysteria2_health import _quic_ping
 
 _DPI_LOG = Path("/var/log/hysteria-dpi.log")
@@ -208,10 +213,7 @@ def h2_dpi_auto_fallback() -> bool:
     # Рестарт H2
     from vless_installer.modules.hysteria2_common import _systemctl
     _systemctl("restart", H2_SERVICE)
-from vless_installer.modules.box_renderer import (
-    _box_top, _box_row, _box_item, _box_item_exit, _box_sep,
-    _box_bottom, _box_back,
-)
+
 
 
     _tg_h2_event("h2_port_fb", f"DPI фолбэк: порт {current_ports[0]} → {best}")

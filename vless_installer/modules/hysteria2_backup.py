@@ -36,6 +36,11 @@ from vless_installer.modules.hysteria2_common import (
     _run, _load_h2_state, _save_h2_state,
     H2_CONFIG_DIR, H2_CONFIG_FILE, H2_CERT_FILE, H2_KEY_FILE,
 )
+from vless_installer.modules.box_renderer import (
+    _box_top, _box_row, _box_item, _box_item_exit, _box_sep,
+    _box_bottom, _box_back,
+)
+
 
 _BACKUP_DIR = Path("/var/backups/vless-installer")
 _BACKUP_PREFIX = "h2_backup"
@@ -165,10 +170,7 @@ def h2_migrate_from_awg() -> dict:
         st = json.loads(STATE_FILE.read_text()) if STATE_FILE.exists() else {}
     except Exception:
         st = {}
-from vless_installer.modules.box_renderer import (
-    _box_top, _box_row, _box_item, _box_item_exit, _box_sep,
-    _box_bottom, _box_back,
-)
+
 
 
     awg_host = st.get("awg_exit_host", "")
