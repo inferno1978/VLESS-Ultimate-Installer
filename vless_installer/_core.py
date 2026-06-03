@@ -555,6 +555,12 @@ CHAIN_PINNED_NODE_INDEX: int = -1
 #  AWG 2.0 (AmneziaWG) — параметры для Режима B
 # =============================================================================
 AWG_EXIT_ENABLED:    bool = False  # True если выбран AWG как транспорт exit
+# ── Hysteria2 транспорт (Режим B, аддитивно) ──────────────────────────────────
+H2_EXIT_ENABLED:     bool = False  # True если выбран Hysteria2 как транспорт exit
+# При H2_EXIT_ENABLED=True: AWG_EXIT_ENABLED=False, prompt_chain_params_multi() пропускается.
+# Xray конфиг генерируется стандартным generate_xray_config_chain_entry_multi() без изменений.
+# После установки вызывается h2_exit_install_local() из hysteria2_exit_mgr.
+# ──────────────────────────────────────────────────────────────────────────────
 AWG_EXIT_HOST:       str  = ""     # IP зарубежного VPS с AWG-сервером
 AWG_EXIT_PORT:       int  = 51820  # UDP-порт AWG-сервера
 AWG_CLIENT_LISTEN_PORT: int = 11100  # UDP-порт на котором слушает AWG-клиент (entry-нода)
@@ -3368,6 +3374,7 @@ def prompt_awg_exit_mode() -> None:
     global AWG_H1, AWG_H2, AWG_H3, AWG_H4, AWG_MTU
     global AWG_SSH_AUTH_METHOD, AWG_SSH_PASSWORD
     global PARAM_REALITY_DEST
+    global H2_EXIT_ENABLED
 
     print()
     _box_top("Транспорт для выхода в Интернет (Режим B)")
@@ -3377,26 +3384,51 @@ def prompt_awg_exit_mode() -> None:
     _box_row()
     _box_item("1", f"{GREEN}VLESS{NC}        — через цепочку VLESS-нод (классика, текущий режим)")
     _box_item("2", f"{CYAN}AmneziaWG 2.0{NC} — через AWG-туннель на зарубежный VPS (рекомендуется)")
+    _box_item("3", f"{YELLOW}Hysteria2{NC}     — через QUIC/UDP туннель на зарубежный VPS")
     _box_row()
     _box_wrap_msg(f"  {DIM}", 2,
         f"AWG: устойчив к DPI, обфусцирован, не требует VLESS на exit-ноде.{NC}")
+    _box_wrap_msg(f"  {DIM}", 2,
+        f"H2: QUIC/UDP, высокая скорость, устойчив к потерям пакетов.{NC}")
     _box_bottom()
 
     while True:
         try:
-            choice = input(f"  {CYAN}Выбор транспорта [1/2, Enter=1]:{NC} ").strip()
+            choice = input(f"  {CYAN}Выбор транспорта [1/2/3, Enter=1]:{NC} ").strip()
         except KeyboardInterrupt:
             print()
             raise
         if choice in ("", "1"):
             AWG_EXIT_ENABLED = False
+            H2_EXIT_ENABLED  = False
             success("Транспорт: VLESS (стандарт)")
             return
         if choice == "2":
             AWG_EXIT_ENABLED = True
+            H2_EXIT_ENABLED  = False
             success("Транспорт: AmneziaWG 2.0")
             break
-        warn("Введите 1 или 2")
+        if choice == "3":
+            AWG_EXIT_ENABLED = False
+            H2_EXIT_ENABLED  = True
+            success("Транспорт: Hysteria2 (QUIC/UDP)")
+            # H2 не требует ввода параметров здесь — настраивается через меню 7
+            # после завершения установки. Ввод VLESS-нод пропускается.
+            _box_top("Hysteria2 — информация")
+            _box_row()
+            _box_row(f"  {YELLOW}Hysteria2 выбран как транспорт exit-ноды.{NC}")
+            _box_row()
+            _box_row(f"  {DIM}Установка Xray (entry-нода) будет выполнена стандартным{NC}")
+            _box_row(f"  {DIM}образом. После завершения установки:{NC}")
+            _box_row()
+            _box_row(f"  {CYAN}→{NC}  Перейдите в меню {BOLD}7 — Hysteria2 транспорт{NC}")
+            _box_row(f"  {CYAN}→{NC}  Пункт {BOLD}1 — Exit-нода{NC}  (установка H2 на exit-VPS)")
+            _box_row(f"  {CYAN}→{NC}  Пункт {BOLD}2 — Выбор транспорта{NC}  (активация H2)")
+            _box_row()
+            _box_bottom()
+            input(f"  {CYAN}Нажмите Enter для продолжения установки...{NC}")
+            return
+        warn("Введите 1, 2 или 3")
 
     # --- Домен маскировки REALITY (dest/sni) ---
     _box_top("Домен маскировки REALITY (dest/sni)")
@@ -5084,6 +5116,7 @@ def do_manage_nodes() -> None:
         CHAIN_BALANCER_STRATEGY = state.get("chain_balancer_strategy", CHAIN_BALANCER_STRATEGY)
         CHAIN_PINNED_NODE_INDEX = state.get("chain_pinned_node_index", -1)
         AWG_EXIT_ENABLED  = state.get("awg_exit_enabled", False)
+        H2_EXIT_ENABLED   = state.get("h2_exit_enabled",  False)
         PARAM_REALITY_DEST = state.get("reality_dest",    PARAM_REALITY_DEST)
     except Exception as e:
         warn(f"Не удалось прочитать state.json: {e}")
@@ -12780,6 +12813,7 @@ def awg_full_setup() -> None:
 def do_full_install() -> None:
     global INSTALL_STARTED, PARAM_USE_DNSCRYPT, DNSCRYPT_INSTALLED
     global SPLIT_TUNNEL_ENABLED, SPLIT_TUNNEL_EXTRA_DOMAINS, SPLIT_TUNNEL_EXTRA_IPS
+    global H2_EXIT_ENABLED
 
     PROGRESS.init(100, "Установка")
 
@@ -12800,12 +12834,12 @@ def do_full_install() -> None:
 
         # ── Для Режима B — сначала выбираем транспорт, потом (если VLESS) ноды ───
         if INSTALL_MODE == "B":
-            # Шаг 1: выбор транспорта (VLESS или AWG).
-            # AWG_EXIT_ENABLED устанавливается внутри prompt_awg_exit_mode().
+            # Шаг 1: выбор транспорта (VLESS, AWG или Hysteria2).
+            # AWG_EXIT_ENABLED / H2_EXIT_ENABLED устанавливаются внутри prompt_awg_exit_mode().
             prompt_awg_exit_mode()
             # Шаг 2: VLESS-ноды нужны ТОЛЬКО при VLESS-транспорте.
-            # При AWG ввод exit-нод пропускается полностью (никаких фейковых данных).
-            if not AWG_EXIT_ENABLED:
+            # При AWG или H2 ввод exit-нод пропускается полностью (никаких фейковых данных).
+            if not AWG_EXIT_ENABLED and not H2_EXIT_ENABLED:
                 prompt_chain_params_multi()
 
         # ── Раздельное туннелирование (split tunneling) ──────────────────────────
@@ -12885,6 +12919,13 @@ def do_full_install() -> None:
             generate_xray_config_chain_entry_multi()
             PROGRESS.update(2, "Конфиг Xray (AWG patch)")
         # ← НИКАКОГО else! Не перезаписываем конфиг каскада!
+
+        # -- Hysteria2: информирование — реальная установка через меню 7 ---------
+        # Xray-конфиг уже сгенерирован выше (generate_xray_config_chain_entry_multi).
+        # H2 не меняет конфиг Xray, не трогает сервисы — только сохраняет флаг.
+        if H2_EXIT_ENABLED:
+            PROGRESS.update(2, "Hysteria2 (отмечен)")
+            info("Mode B + H2: транспорт Hysteria2 выбран — настройте exit-ноду через меню 7.")
         
     elif INSTALL_MODE == "A":
         if AWG_EXIT_ENABLED:
@@ -13093,6 +13134,8 @@ def do_full_install() -> None:
             "awg_ssh_client_ip":     _AWG_SSH_CLIENT_IP,
             # === END PATCH v2 ===
             "reality_dest":      PARAM_REALITY_DEST,
+            # Hysteria2 транспорт
+            "h2_exit_enabled":   H2_EXIT_ENABLED,
         })
     STATE_FILE.write_text(json.dumps(state, indent=2, ensure_ascii=False))
 
@@ -29527,6 +29570,7 @@ def _load_state_into_globals() -> None:
     global IS_IPV6_AVAILABLE, IPV6_PREFLIGHT, PARAM_USE_DNSCRYPT
     global INSTALL_MODE, PROTOCOL_MODE, XHTTP_MODE, XHTTP_PATH, XHTTP_PERF_PRESET
     global AWG_EXIT_ENABLED, AWG_INSTALLED, AWG_EXIT_HOST, AWG_EXIT_PORT, PARAM_REALITY_DEST
+    global H2_EXIT_ENABLED
     global XTLS_FLOW
     # === FIX 1: объявление глобалей для multi-node полей ===
     global AWG_NODES, AWG_ACTIVE_NODE_INDEX, _AWG_SSH_CLIENT_IP
@@ -29595,6 +29639,8 @@ def _load_state_into_globals() -> None:
         AWG_EXIT_PORT    = state.get("awg_exit_port",     AWG_EXIT_PORT)
         AWG_CLIENT_LISTEN_PORT = state.get("awg_client_listen_port", AWG_CLIENT_LISTEN_PORT)
         PARAM_REALITY_DEST = state.get("reality_dest",   PARAM_REALITY_DEST)
+        # Hysteria2 транспорт
+        H2_EXIT_ENABLED  = state.get("h2_exit_enabled",  False)
         # === FIX 1: загрузка multi-node полей ===
         AWG_NODES             = state.get("awg_nodes",             [])
         AWG_ACTIVE_NODE_INDEX = state.get("awg_active_node_index", 0)
