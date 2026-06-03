@@ -542,12 +542,19 @@ def _show_page(top: list[str], page: int, current: list[str], sorted_by_rtt: boo
     #   COL_NUM=5  пробел  COL_NAME(auto)  пробел  COL_LAT=14
     # Разделителей │ нет — они ломаются из-за ANSI при расчёте padding в _box_row.
     COL_NUM  = 5   # "  99." — всегда 5 видимых символов
-    COL_LAT  = 14  # "999 мс ←" — 14 видимых символов с запасом
+    COL_LAT  = 20  # "999 мс ← текущий" — 20 видимых символов с запасом
     # COL_NAME: всё оставшееся место внутри рамки
     # Формула: _BOX_W = 1(лев.пробел) + COL_NUM + 2(пробелы) + COL_NAME + 2(пробелы) + COL_LAT
     COL_NAME = _BOX_W - 1 - COL_NUM - 2 - 2 - COL_LAT
     if COL_NAME < 20:
         COL_NAME = 20
+
+    def _box_row_exact(text: str) -> None:
+        """Вывод строки таблицы БЕЗ автопереноса — колонки уже точно рассчитаны."""
+        pad = _BOX_W - _wcslen(text)
+        if pad < 0:
+            pad = 0
+        print(f"{CYAN}║{NC}{text}{' ' * pad}{CYAN}║{NC}")
 
     def _pad_right(text_with_ansi: str, width: int) -> str:
         """Дополняет строку пробелами справа до видимой ширины width."""
@@ -567,11 +574,11 @@ def _show_page(top: list[str], page: int, current: list[str], sorted_by_rtt: boo
         f"  {_pad_right(f'{DIM}Резолвер{NC}', COL_NAME)}"
         f"  {_pad_left(f'{DIM}Время отклика{NC}', COL_LAT)}"
     )
-    _box_row(hdr)
+    _box_row_exact(hdr)
 
     # Горизонтальный разделитель под шапкой — сплошная линия ─── без ┼
     sep_line = f" {DIM}" + "─" * (_BOX_W - 1) + f"{NC}"
-    _box_row(sep_line)
+    _box_row_exact(sep_line)
 
     # ── Строки резолверов ──────────────────────────────────────────────────
     for i in range(start, end):
@@ -597,7 +604,7 @@ def _show_page(top: list[str], page: int, current: list[str], sorted_by_rtt: boo
             ms_text = f"{DIM}—{NC}{marker}"
         lat_col = _pad_left(ms_text, COL_LAT)
 
-        _box_row(f" {num_col}  {name_col}  {lat_col}")
+        _box_row_exact(f" {num_col}  {name_col}  {lat_col}")
 
     # ── Навигация ──────────────────────────────────────────────────────────
     _box_line_sep()

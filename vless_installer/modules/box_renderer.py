@@ -220,37 +220,60 @@ def _box_row(text: str = "") -> None:
         print(f"{CYAN}║{NC}{text}{' ' * pad}{CYAN}║{NC}")
         return
 
-    # Текст длиннее рамки — переносим по словам
-    # Определяем ведущий отступ (пробелы в начале видимой части)
+    # Текст длиннее рамки — переносим по словам.
+    #
+    # ВАЖНО: ведущий отступ ищем по _plain() (без ANSI), но отрезаем
+    # от оригинальной строки нельзя по числовому индексу — строка может
+    # начинаться с ANSI-кода (\033[1;37m...), и text[N:] разрежет его.
+    # Правильный способ: пропустить ANSI-последовательности в начале строки,
+    # затем отрезать ровно leading_spaces видимых пробелов.
+    #
     plain = _plain(text)
-    indent_len = len(plain) - len(plain.lstrip(' '))
-    indent = ' ' * indent_len
-    cont_w = _BOX_W - indent_len  # доступная ширина для продолжений
+    leading_spaces = len(plain) - len(plain.lstrip(' '))
+    indent = ' ' * leading_spaces   # отступ для строк продолжения
 
-    # Делим по пробелам.
-    # split(' ') на строке с ведущими пробелами даёт пустые элементы в начале,
-    # которые теряются при сборке. Сохраняем ведущий отступ явно.
-    plain_for_indent = _plain(text)
-    leading_spaces = len(plain_for_indent) - len(plain_for_indent.lstrip(' '))
-    prefix = ' ' * leading_spaces          # ведущий отступ первой строки
-    text_stripped = text[leading_spaces:]  # текст без ведущих пробелов (с ANSI)
+    # Находим позицию в оригинальной строке, пропуская начальные ANSI-коды
+    # и ровно leading_spaces видимых пробелов
+    _ansi_re_strip = _re.compile(r'\033\[[0-9;]*m')
+    pos = 0
+    skipped_vis = 0
+    while pos < len(text) and skipped_vis < leading_spaces:
+        # Пропускаем ANSI-коды (нулевая видимая ширина)
+        m = _ansi_re_strip.match(text, pos)
+        if m:
+            pos = m.end()
+            continue
+        # Видимый символ — должен быть пробел
+        if text[pos] == ' ':
+            skipped_vis += 1
+            pos += 1
+        else:
+            break  # дошли до не-пробела раньше — не трогаем
+    text_stripped = text[pos:]   # текст после ведущих пробелов (ANSI целые)
+    prefix = ' ' * leading_spaces  # ведущий отступ первой строки (чистые пробелы)
 
     words = text_stripped.split(' ')
     lines_out: list[str] = []
-    current = prefix   # первая строка начинается с отступа
+    current = prefix
     current_vis = leading_spaces
 
     for word in words:
+        if not word:
+            # пустые токены от split — добавляем пробел если есть место
+            if current_vis + 1 <= _BOX_W:
+                current     += ' '
+                current_vis += 1
+            continue
         word_vis = _wcslen(word)
-        sep_vis  = 1 if current else 0
+        sep_vis  = 1 if current.strip() else 0
         if current_vis + sep_vis + word_vis <= _BOX_W:
-            current     = current + (' ' if current else '') + word
+            current     = current + (' ' if current.strip() else '') + word
             current_vis = current_vis + sep_vis + word_vis
         else:
-            if current:
+            if current.strip():
                 lines_out.append(current)
-            # Слово само по себе длиннее строки — режем жёстко
-            avail = max(_BOX_W - indent_len, 8)
+            # Слово само по себе длиннее строки — режем жёстко по символам
+            avail = max(_BOX_W - leading_spaces, 8)
             while _wcslen(word) > avail:
                 piece = ''
                 pw = 0
@@ -263,9 +286,11 @@ def _box_row(text: str = "") -> None:
                 lines_out.append(indent + piece)
                 word = word[len(piece):]
             current     = indent + word
-            current_vis = indent_len + _wcslen(word)
+            current_vis = leading_spaces + _wcslen(word)
 
-    if current:
+    if current.strip():
+        lines_out.append(current)
+    elif not lines_out:
         lines_out.append(current)
 
     for line in lines_out:
