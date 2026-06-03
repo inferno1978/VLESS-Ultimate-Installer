@@ -4594,10 +4594,15 @@ def generate_xray_config_chain_entry_multi() -> None:
             }]
         elif AWG_EXIT_ENABLED:
             # AWG-режим: exit-нод нет (трафик идёт через AWG-туннель).
-            # Используем generate_xray_config() — она создаёт конфиг с freedom outbound
-            # и AWG fwmark. Это корректный конфиг для Mode B + AWG.
-            info("Mode B + AWG: нет VLESS exit-нод, используем AWG-конфиг...")
-            generate_xray_config()
+            # Для xHTTP вызываем generate_xray_config_xhttp() — она не содержит
+            # realitySettings и не требует REALITY-ключей (используется TLS Let's Encrypt).
+            # Для REALITY-режимов вызываем generate_xray_config() с AWG fwmark.
+            if PROTOCOL_MODE == "xhttp":
+                info("Mode B + AWG + xHTTP: нет VLESS exit-нод, используем xHTTP-конфиг...")
+                generate_xray_config_xhttp()
+            else:
+                info("Mode B + AWG: нет VLESS exit-нод, используем AWG-конфиг...")
+                generate_xray_config()
             return
         else:
             warn("Нет exit-нод — конфиг Entry Node не может быть создан.")
@@ -7244,9 +7249,16 @@ def generate_xray_config_xhttp() -> None:
             },
         }],
         "outbounds": [
-            {"protocol": "freedom", "tag": "direct",
-             # UseIPv6v4: Xray предпочитает IPv6 при исходящих соединениях.
-             "settings": {"domainStrategy": "UseIPv6v4"}},
+            {
+                "protocol": "freedom",
+                "tag": "direct",
+                # UseIPv6v4: Xray предпочитает IPv6 при исходящих соединениях.
+                "settings": {"domainStrategy": "UseIPv6v4"},
+                # ПАТЧ: при AWG_EXIT_ENABLED добавляем sockopt.mark, чтобы исходящий
+                # трафик Xray маршрутизировался через AWG-туннель (policy routing fwmark).
+                **({"streamSettings": {"sockopt": {"mark": AWG_FWMARK}}}
+                   if AWG_EXIT_ENABLED else {}),
+            },
             {"protocol": "blackhole", "tag": "BLOCK"},
         ],
         "routing": {
