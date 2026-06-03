@@ -38,6 +38,11 @@ from vless_installer.modules.hysteria2_common import (
     _tg_h2_event,
     H2_CERT_FILE, H2_KEY_FILE,
 )
+from vless_installer.modules.box_renderer import (
+    _box_top, _box_row, _box_item, _box_item_exit, _box_sep,
+    _box_bottom, _box_back,
+)
+
 
 _RENEW_CRON = Path("/etc/cron.d/hysteria2-cert-renew")
 
@@ -209,10 +214,12 @@ def do_h2_cert_menu() -> None:
     while True:
         os.system("clear")
         print()
-        print(f"{CYAN}{'═'*62}{NC}")
-        print(f"  {BOLD}🔒 Hysteria2 — Управление сертификатами{NC}")
-        print(f"{CYAN}{'═'*62}{NC}")
-        print()
+        h2   = _load_h2_state()
+        cert = h2.get("cert", {})
+        _box_top("🔒  HYSTERIA2 — УПРАВЛЕНИЕ СЕРТИФИКАТАМИ")
+        _box_row(f"  Домен: {CYAN}{cert.get('domain','—')}{NC}  │  Тип: {CYAN}{cert.get('type','—')}{NC}  │  Истекает: {CYAN}{cert.get('expires','—')}{NC}")
+        _box_sep()
+        _box_row()
 
         info_d = h2_cert_check()
         if info_d["exists"]:
@@ -228,15 +235,15 @@ def do_h2_cert_menu() -> None:
         domain   = h2_state.get("cert", {}).get("domain", "—")
         print(f"  Домен:       {CYAN}{domain}{NC}")
         print()
-        print(f"  {CYAN}1{NC}  Получить Let's Encrypt (certbot)")
-        print(f"  {CYAN}2{NC}  Создать самоподписанный (3650 дней)")
-        print(f"  {CYAN}3{NC}  Принудительное продление")
-        print(f"  {CYAN}4{NC}  Проверить срок")
-        print(f"  {CYAN}5{NC}  Установить мониторинг (cron)")
-        print(f"  {CYAN}6{NC}  Задать домен")
-        print()
-        print(f"  {DIM}[Q]{NC}  ← Назад")
-        print()
+        _box_item("1", "Получить Let's Encrypt  (certbot)")
+        _box_item("2", f"Создать самоподписанный  {DIM}(3650 дней){NC}")
+        _box_item("3", "Принудительное продление")
+        _box_item("4", "Проверить срок")
+        _box_item("5", f"Установить мониторинг  {DIM}(cron){NC}")
+        _box_item("6", "Задать домен")
+        _box_row()
+        _box_item_exit("Q", "← Назад")
+        _box_bottom()
 
         try:
             ch = input(f"{CYAN}Выбор:{NC} ").strip().upper()

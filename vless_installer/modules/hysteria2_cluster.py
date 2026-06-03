@@ -38,6 +38,11 @@ from vless_installer.modules.hysteria2_common import (
     _tg_h2_event,
     H2_SERVICE,
 )
+from vless_installer.modules.box_renderer import (
+    _box_top, _box_row, _box_item, _box_item_exit, _box_sep,
+    _box_bottom, _box_back,
+)
+
 
 _SSH_TIMEOUT  = 30
 _CONN_TIMEOUT = 10
@@ -246,32 +251,29 @@ def do_h2_cluster_menu() -> None:
     while True:
         os.system("clear")
         print()
-        print(f"{CYAN}{'═'*62}{NC}")
-        print(f"  {BOLD}🖧  Hysteria2 — Кластерные операции{NC}")
-        print(f"{CYAN}{'═'*62}{NC}")
-        print()
-
         h2    = _load_h2_state()
         nodes = h2.get("exit_nodes", [])
-        print(f"  Exit-нод в state.json: {CYAN}{len(nodes)}{NC}")
-        for n in nodes:
-            print(f"    {DIM}• {n.get('ip','?')}:{n.get('ports',[443])[0]}  "
-                  f"status={n.get('status','?')}{NC}")
-
         cred_str = (f"ключ ({key})" if key else
                     ("пароль (задан)" if password else f"{YELLOW}не задан{NC}"))
-        print(f"  SSH-доступ: {DIM}{cred_str}{NC}")
-        print()
-        print(f"  {CYAN}1{NC}  Статус сервиса на всех нодах")
-        print(f"  {CYAN}2{NC}  Перезапуск на всех нодах")
-        print(f"  {CYAN}3{NC}  Просмотр логов на всех нодах")
-        print(f"  {CYAN}4{NC}  Обновить бинарник на всех нодах")
-        print(f"  {CYAN}5{NC}  Произвольная команда")
-        print(f"  {CYAN}6{NC}  Задать SSH-реквизиты")
-        print(f"  {CYAN}7{NC}  Удалить ноду из state.json")
-        print()
-        print(f"  {DIM}[Q]{NC}  ← Назад")
-        print()
+
+        _box_top("🖧  HYSTERIA2 — КЛАСТЕРНЫЕ ОПЕРАЦИИ")
+        _box_row(f"  Нод в state: {CYAN}{len(nodes)}{NC}  │  SSH-доступ: {DIM}{cred_str}{NC}")
+        if nodes:
+            for n in nodes:
+                col = GREEN if n.get("status") == "active" else RED
+                _box_row(f"  {col}●{NC}  {n.get('ip','?')}:{n.get('ports',[443])[0]}  {DIM}status={n.get('status','?')}{NC}")
+        _box_sep()
+        _box_row()
+        _box_item("1", "Статус сервиса на всех нодах")
+        _box_item("2", "Перезапуск на всех нодах")
+        _box_item("3", "Просмотр логов на всех нодах")
+        _box_item("4", "Обновить бинарник на всех нодах")
+        _box_item("5", "Произвольная команда")
+        _box_item("6", "Задать SSH-реквизиты")
+        _box_item("7", "Удалить ноду из state.json")
+        _box_row()
+        _box_item_exit("Q", "← Назад")
+        _box_bottom()
 
         try:
             ch = input(f"{CYAN}Выбор:{NC} ").strip().upper()
@@ -314,10 +316,14 @@ def do_h2_cluster_menu() -> None:
 def _set_ssh_creds_interactive(nodes: list[dict], cb) -> None:
     """Интерактивный выбор SSH-реквизитов."""
     print()
-    print(f"  {CYAN}1{NC}  Использовать SSH-ключ (~/.ssh/id_*)")
-    print(f"  {CYAN}2{NC}  Ввести пароль")
+    _box_top("🔑  SSH РЕКВИЗИТЫ")
+    _box_item("1", "Использовать SSH-ключ  (~/.ssh/id_*)")
+    _box_item("2", "Ввести пароль")
+    _box_row()
+    _box_item_exit("Q", "← Отмена")
+    _box_bottom()
     try:
-        c = input(f"  {CYAN}Выбор:{NC} ").strip()
+        c = input(f"{CYAN}Выбор:{NC} ").strip()
     except KeyboardInterrupt:
         return
     # Реальное использование через _get_creds() при следующей операции
@@ -330,8 +336,12 @@ def _remove_node_interactive() -> None:
         warn("Нет нод")
         return
     print()
+    _box_top("🗑️  УДАЛИТЬ НОДУ")
     for i, n in enumerate(nodes):
-        print(f"  {CYAN}{i+1}{NC}  {n.get('ip','?')}")
+        _box_item(str(i+1), n.get('ip', '?'))
+    _box_row()
+    _box_item_exit("Q", "← Отмена")
+    _box_bottom()
     try:
         idx = int(input(f"  {CYAN}Удалить ноду №:{NC} ").strip()) - 1
     except (KeyboardInterrupt, ValueError):
@@ -341,7 +351,7 @@ def _remove_node_interactive() -> None:
         h2["exit_nodes"] = nodes
         _save_h2_state(h2)
         success(f"Нода {removed.get('ip')} удалена из state.json")
-    input(f"\n{BLUE}Нажмите Enter...{NC}")
+    input(f"\n{CYAN}Нажмите Enter...{NC}")
 
 
 """

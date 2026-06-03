@@ -41,6 +41,11 @@ from vless_installer.modules.hysteria2_common import (
     _tg_h2_event,
     H2_LOG_FILE,
 )
+from vless_installer.modules.box_renderer import (
+    _box_top, _box_row, _box_item, _box_item_exit, _box_sep,
+    _box_bottom, _box_back,
+)
+
 
 _STATS_CACHE = Path("/var/lib/xray-installer/h2_traffic_cache.json")
 _PREV_BYTES_KEY = "_h2_prev_bytes"
@@ -215,10 +220,8 @@ def do_h2_traffic_menu() -> None:
     while True:
         os.system("clear")
         print()
-        print(f"{CYAN}{'═'*62}{NC}")
-        print(f"  {BOLD}📊 Hysteria2 — Трафик{NC}")
-        print(f"{CYAN}{'═'*62}{NC}")
-        print()
+        _box_top("📊  HYSTERIA2 — ТРАФИК")
+        _box_row()
 
         stats = h2_traffic_collect()
         print(f"  RX:         {GREEN}{_bytes_to_human(stats['rx_bytes'])}{NC}  "
@@ -241,12 +244,12 @@ def do_h2_traffic_menu() -> None:
                       f"{n.get('status','—')}")
 
         print()
-        print(f"  {CYAN}1{NC}  Обновить")
-        print(f"  {CYAN}2{NC}  Отправить отчёт в Telegram")
-        print(f"  {CYAN}3{NC}  Показать лог H2 (tail -50)")
-        print()
-        print(f"  {DIM}[Q]{NC}  ← Назад")
-        print()
+        _box_item("1", "Обновить")
+        _box_item("2", "Отправить отчёт в Telegram")
+        _box_item("3", f"Показать лог H2  {DIM}(tail -50){NC}")
+        _box_row()
+        _box_item_exit("Q", "← Назад")
+        _box_bottom()
 
         try:
             ch = input(f"{CYAN}Выбор:{NC} ").strip().upper()

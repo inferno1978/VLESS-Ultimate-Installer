@@ -59,11 +59,8 @@ def h2_smoke_test(verbose: bool = True) -> bool:
     """
     if verbose:
         print()
-        print(f"{CYAN}{'═'*62}{NC}")
-        print(f"  {BOLD}🔬 Hysteria2 Smoke Test{NC}  "
-              f"{DIM}{datetime.now().strftime('%d.%m.%Y %H:%M:%S')}{NC}")
-        print(f"{CYAN}{'═'*62}{NC}")
-        print()
+        _box_top(f"🔬  HYSTERIA2 SMOKE TEST  {DIM}{datetime.now().strftime('%d.%m.%Y %H:%M:%S')}{NC}")
+        _box_row()
 
     h2    = _load_h2_state()
     ports = h2.get("firewall", {}).get("udp_ports", [443])
@@ -169,6 +166,11 @@ def h2_smoke_test(verbose: bool = True) -> bool:
                                       f"{rtt6}ms" if rtt6 else "timeout")
         else:
             print(f"  {_SKP} IPv6 ноды не настроены — пропущено")
+from vless_installer.modules.box_renderer import (
+    _box_top, _box_row, _box_item, _box_item_exit, _box_sep,
+    _box_bottom, _box_back,
+)
+
 
     # ── Итог ─────────────────────────────────────────────────────────────────
     critical = ["binary", "service", "cert", "config", "xray_config"]
@@ -179,9 +181,9 @@ def h2_smoke_test(verbose: bool = True) -> bool:
     print()
     print(f"{CYAN}{'─'*62}{NC}")
     color = GREEN if all_critical_ok else RED
-    print(f"  {color}{'✓ Все критичные тесты прошли' if all_critical_ok else '✗ Есть критичные ошибки'}{NC}"
-          f"  ({total_ok}/{total_all} тестов ОК)")
-    print(f"{CYAN}{'═'*62}{NC}")
+    _box_row(f"  {color}{'✓ Все критичные тесты прошли' if all_critical_ok else '✗ Есть критичные ошибки'}{NC}  ({total_ok}/{total_all} тестов ОК)")
+    _box_row()
+    _box_bottom()
 
     log_to_file(
         "INFO" if all_critical_ok else "ERROR",
@@ -196,15 +198,15 @@ def do_h2_smoke_test_menu() -> None:
     while True:
         os.system("clear")
         print()
-        print(f"{CYAN}{'═'*62}{NC}")
-        print(f"  {BOLD}🔬 Hysteria2 — Smoke Test{NC}")
-        print(f"{CYAN}{'═'*62}{NC}")
-        print()
-        print(f"  {CYAN}1{NC}  Запустить полный Smoke Test")
-        print(f"  {CYAN}2{NC}  Быстрый тест (только сервис + порт)")
-        print()
-        print(f"  {DIM}[Q]{NC}  ← Назад")
-        print()
+        _box_top("🔬  HYSTERIA2 — SMOKE TEST")
+        _box_row(f"  {DIM}Полная диагностическая проверка после установки{NC}")
+        _box_sep()
+        _box_row()
+        _box_item("1", "Запустить полный Smoke Test")
+        _box_item("2", f"Быстрый тест  {DIM}(только сервис + порт){NC}")
+        _box_row()
+        _box_item_exit("Q", "← Назад")
+        _box_bottom()
 
         try:
             ch = input(f"{CYAN}Выбор:{NC} ").strip().upper()

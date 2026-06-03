@@ -38,6 +38,11 @@ from vless_installer.modules.hysteria2_common import (
     _run, _load_h2_state, _save_h2_state,
     _tg_h2_event, _is_ipv6,
 )
+from vless_installer.modules.box_renderer import (
+    _box_top, _box_row, _box_item, _box_item_exit, _box_sep,
+    _box_bottom, _box_back,
+)
+
 
 # ── Константы ─────────────────────────────────────────────────────────────────
 _DEFAULT_STRATEGY = "weightedRandom"
@@ -202,40 +207,35 @@ def do_h2_balancer_menu() -> None:
     while True:
         os.system("clear")
         print()
-        print(f"{CYAN}{'═'*62}{NC}")
-        print(f"  {BOLD}⚖️  Hysteria2 — Балансировщик нод{NC}")
-        print(f"{CYAN}{'═'*62}{NC}")
-        print()
-
         h2       = _load_h2_state()
         balancer = h2.get("balancer", {})
         nodes    = h2.get("exit_nodes", [])
         strategy = balancer.get("strategy", _DEFAULT_STRATEGY)
         active   = h2.get("_active_node_ip", "—")
 
-        print(f"  Стратегия:     {CYAN}{strategy}{NC}")
-        print(f"  Активная нода: {GREEN}{active}{NC}")
-        print(f"  Порог смены:   {balancer.get('switch_threshold', _SWITCH_THRESHOLD)*100:.0f}% потерь")
-        print()
-
+        _box_top("⚖️  HYSTERIA2 — БАЛАНСИРОВЩИК НОД")
+        _box_row(f"  Стратегия: {CYAN}{strategy}{NC}  │  Активная: {GREEN}{active}{NC}  │  Порог: {balancer.get('switch_threshold', _SWITCH_THRESHOLD)*100:.0f}% потерь")
+        _box_sep()
+        _box_row()
         if nodes:
-            print(f"  {'IP':<20} {'Вес':<8} {'RTT мс':<10} {'Статус'}")
-            print(f"  {'-'*55}")
+            _box_row(f"  {CYAN}{'IP':<20} {'Вес':<8} {'RTT мс':<10} Статус{NC}")
+            _box_row(f"  {DIM}{'─'*50}{NC}")
             for n in nodes:
-                m    = n.get("metrics", {})
-                st   = n.get("status", "—")
-                col  = GREEN if st == "active" else RED
-                print(f"  {n.get('ip',''):<20} {n.get('weight',1.0):<8.3f} "
-                      f"{str(m.get('rtt_ms',0))+'ms':<10} {col}{st}{NC}")
-        print()
-        print(f"  {CYAN}1{NC}  Изменить стратегию")
-        print(f"  {CYAN}2{NC}  Установить вес ноды вручную")
-        print(f"  {CYAN}3{NC}  Автопересчёт весов (по RTT/потерям)")
-        print(f"  {CYAN}4{NC}  Запустить балансировщик сейчас")
-        print(f"  {CYAN}5{NC}  Установить порог переключения")
-        print()
-        print(f"  {DIM}[Q]{NC}  ← Назад")
-        print()
+                m   = n.get("metrics", {})
+                st  = n.get("status", "—")
+                col = GREEN if st == "active" else RED
+                _box_row(f"  {n.get('ip',''):<20} {n.get('weight',1.0):<8.3f} {str(m.get('rtt_ms',0))+'ms':<10} {col}{st}{NC}")
+            _box_row()
+        _box_sep()
+        _box_row()
+        _box_item("1", "Изменить стратегию")
+        _box_item("2", "Установить вес ноды вручную")
+        _box_item("3", f"Автопересчёт весов  {DIM}(по RTT/потерям){NC}")
+        _box_item("4", "Запустить балансировщик сейчас")
+        _box_item("5", "Установить порог переключения")
+        _box_row()
+        _box_item_exit("Q", "← Назад")
+        _box_bottom()
 
         try:
             ch = input(f"{CYAN}Выбор:{NC} ").strip().upper()
@@ -268,11 +268,14 @@ def do_h2_balancer_menu() -> None:
 def _change_strategy() -> None:
     strategies = ["weightedRandom", "leastRtt", "roundRobin"]
     print()
+    _box_top("⚖️  СТРАТЕГИЯ БАЛАНСИРОВКИ")
     for i, s in enumerate(strategies, 1):
-        print(f"  {CYAN}{i}{NC}  {s}")
-    print()
+        _box_item(str(i), s)
+    _box_row()
+    _box_item_exit("Q", "← Отмена")
+    _box_bottom()
     try:
-        ch = input(f"  {CYAN}Выбор:{NC} ").strip()
+        ch = input(f"{CYAN}Выбор:{NC} ").strip()
     except KeyboardInterrupt:
         return
     if ch.isdigit() and 1 <= int(ch) <= len(strategies):
@@ -280,7 +283,7 @@ def _change_strategy() -> None:
         h2.setdefault("balancer", {})["strategy"] = strategies[int(ch)-1]
         _save_h2_state(h2)
         success(f"Стратегия → {strategies[int(ch)-1]}")
-    input(f"\n{BLUE}Нажмите Enter...{NC}")
+    input(f"\n{CYAN}Нажмите Enter...{NC}")
 
 
 def _set_node_weight() -> None:
@@ -290,9 +293,11 @@ def _set_node_weight() -> None:
         warn("Нет нод")
         return
     print()
+    _box_top("⚖️  УСТАНОВИТЬ ВЕС НОДЫ")
     for i, n in enumerate(nodes):
-        print(f"  {CYAN}{i+1}{NC}  {n['ip']} (текущий вес: {n.get('weight',1.0)})")
-    print()
+        _box_item(str(i+1), f"{n['ip']}  {DIM}(текущий вес: {n.get('weight',1.0)}){NC}")
+    _box_row()
+    _box_bottom()
     try:
         idx  = int(input(f"  {CYAN}Номер ноды:{NC} ").strip()) - 1
         wval = float(input(f"  {CYAN}Новый вес{NC} (0.1 – 10.0): ").strip())
@@ -304,7 +309,7 @@ def _set_node_weight() -> None:
         _save_h2_state(h2)
         success(f"Вес ноды {nodes[idx]['ip']} → {nodes[idx]['weight']}")
         _tg_h2_event("h2_weights", f"Вес {nodes[idx]['ip']} → {nodes[idx]['weight']}")
-    input(f"\n{BLUE}Нажмите Enter...{NC}")
+    input(f"\n{CYAN}Нажмите Enter...{NC}")
 
 
 def _set_threshold() -> None:

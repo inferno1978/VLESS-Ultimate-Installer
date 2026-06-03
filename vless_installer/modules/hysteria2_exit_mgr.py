@@ -45,6 +45,10 @@ from vless_installer.modules.hysteria2_common import (
     H2_CONFIG_DIR, H2_CONFIG_FILE, H2_BINARY, H2_SERVICE, H2_LOG_FILE,
     H2_CERT_FILE, H2_KEY_FILE,
 )
+from vless_installer.modules.box_renderer import (
+    _box_top, _box_row, _box_item, _box_item_exit, _box_sep,
+    _box_bottom, _box_back,
+)
 
 # ── GitHub releases ───────────────────────────────────────────────────────────
 _GH_API = "https://api.github.com/repos/apernet/hysteria/releases/latest"
@@ -419,30 +423,27 @@ def _generate_systemd_remote() -> str:
 def do_h2_exit_menu() -> None:
     """
     Интерактивное меню управления Exit-нодой Hysteria2.
-    Вызывается из do_hysteria2_menu() в _core.py.
+    Вызывается из do_hysteria2_menu().
     """
     while True:
         os.system("clear")
         print()
-        print(f"{CYAN}{'═'*62}{NC}")
-        print(f"  {BOLD}📡 Hysteria2 — Exit-нода{NC}")
-        print(f"{CYAN}{'═'*62}{NC}")
-        print()
-
         st = h2_exit_status()
         status_str = f"{GREEN}активен{NC}" if st["active"] else f"{RED}остановлен{NC}"
-        print(f"  Сервис: {status_str}  │  Версия: {DIM}{st['version'] or '—'}{NC}  │  Порты UDP: {CYAN}{st['ports']}{NC}")
-        print()
 
-        print(f"  {CYAN}1{NC}  Установить H2 (локально — эта нода)")
-        print(f"  {CYAN}2{NC}  Установить H2 на удалённую Exit-ноду (SSH)")
-        print(f"  {CYAN}3{NC}  Статус сервиса")
-        print(f"  {CYAN}4{NC}  Перезапустить сервис")
-        print(f"  {CYAN}5{NC}  Показать конфиг ({H2_CONFIG_FILE})")
-        print(f"  {CYAN}6{NC}  Удалить H2 с этой ноды")
-        print()
-        print(f"  {DIM}[Q]{NC}  ← Назад")
-        print()
+        _box_top("🖥️  HYSTERIA2 — EXIT-НОДА")
+        _box_row(f"  Сервис: {status_str}  │  Версия: {DIM}{st['version'] or '—'}{NC}  │  Порты UDP: {CYAN}{st['ports']}{NC}")
+        _box_sep()
+        _box_row()
+        _box_item("1", "Установить H2 (локально — эта нода)")
+        _box_item("2", "Установить H2 на удалённую Exit-ноду (SSH)")
+        _box_item("3", "Статус сервиса")
+        _box_item("4", "Перезапустить сервис")
+        _box_item("5", f"Показать конфиг  {DIM}({H2_CONFIG_FILE}){NC}")
+        _box_item("6", f"Удалить H2 с этой ноды  {DIM}(⚠️  необратимо){NC}")
+        _box_row()
+        _box_item_exit("Q", "← Назад")
+        _box_bottom()
 
         try:
             ch = input(f"{CYAN}Выбор:{NC} ").strip().upper()
@@ -455,23 +456,40 @@ def do_h2_exit_menu() -> None:
             _interactive_remote_install()
         elif ch == "3":
             st = h2_exit_status()
+            os.system("clear")
             print()
+            _box_top("📊  СТАТУС EXIT-НОДЫ")
             for k, v in st.items():
-                print(f"  {k}: {v}")
-            input(f"\n{BLUE}Нажмите Enter...{NC}")
+                _box_row(f"  {CYAN}{k}:{NC}  {v}")
+            _box_row()
+            _box_item_exit("0", "← Назад")
+            _box_bottom()
+            try:
+                input(f"{CYAN}Нажмите Enter...{NC}")
+            except KeyboardInterrupt:
+                pass
         elif ch == "4":
             _systemctl("restart", H2_SERVICE)
             time.sleep(1)
             ok = _service_active(H2_SERVICE)
             success("Перезапущен") if ok else error("Не запустился")
-            input(f"\n{BLUE}Нажмите Enter...{NC}")
+            input(f"\n{CYAN}Нажмите Enter...{NC}")
         elif ch == "5":
+            os.system("clear")
+            print()
+            _box_top(f"📄  КОНФИГ  {H2_CONFIG_FILE}")
             if H2_CONFIG_FILE.exists():
-                print()
-                print(H2_CONFIG_FILE.read_text())
+                for line in H2_CONFIG_FILE.read_text().splitlines():
+                    _box_row(f"  {DIM}{line}{NC}")
             else:
-                warn("Конфиг не найден")
-            input(f"\n{BLUE}Нажмите Enter...{NC}")
+                _box_row(f"  {YELLOW}Конфиг не найден{NC}")
+            _box_row()
+            _box_item_exit("0", "← Назад")
+            _box_bottom()
+            try:
+                input(f"{CYAN}Нажмите Enter...{NC}")
+            except KeyboardInterrupt:
+                pass
         elif ch == "6":
             try:
                 confirm = input(f"{YELLOW}Удалить Hysteria2? [y/N]:{NC} ").strip().lower()
@@ -479,7 +497,7 @@ def do_h2_exit_menu() -> None:
                 continue
             if confirm == "y":
                 h2_exit_remove()
-                input(f"\n{BLUE}Нажмите Enter...{NC}")
+                input(f"\n{CYAN}Нажмите Enter...{NC}")
         elif ch in ("Q", ""):
             break
         else:

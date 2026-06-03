@@ -35,6 +35,11 @@ from vless_installer.modules.hysteria2_common import (
     _run, _load_h2_state, _save_h2_state,
     _tg_h2_event, _is_ipv6, _bracket,
 )
+from vless_installer.modules.box_renderer import (
+    _box_top, _box_row, _box_item, _box_item_exit, _box_sep,
+    _box_bottom, _box_back,
+)
+
 
 _HEALTH_LOG = Path("/var/log/hysteria-health.log")
 _QUIC_PROBE_TIMEOUT = 5      # секунды на одну попытку
@@ -226,10 +231,14 @@ def do_h2_health_menu() -> None:
     while True:
         os.system("clear")
         print()
-        print(f"{CYAN}{'═'*62}{NC}")
-        print(f"  {BOLD}🩺 Hysteria2 — Health Check{NC}")
-        print(f"{CYAN}{'═'*62}{NC}")
-        print()
+        h2 = _load_h2_state()
+        hc = h2.get("health_check", {})
+        n_ok    = sum(1 for n in h2.get("exit_nodes",[]) if n.get("status")=="active")
+        n_total = len(h2.get("exit_nodes",[]))
+        _box_top("🩺  HYSTERIA2 — HEALTH CHECK")
+        _box_row(f"  Ноды OK: {GREEN}{n_ok}{NC}/{n_total}  │  Интервал: {CYAN}{hc.get('interval_sec',60)}с{NC}  │  Таймаут: {CYAN}{hc.get('timeout_sec',5)}с{NC}  │  Порог сбоев: {CYAN}{hc.get('fail_threshold',3)}{NC}")
+        _box_sep()
+        _box_row()
 
         h2    = _load_h2_state()
         nodes = h2.get("exit_nodes", [])
@@ -254,12 +263,12 @@ def do_h2_health_menu() -> None:
               f"Таймаут: {hc.get('timeout_sec',5)}с  |  "
               f"Порог сбоев: {hc.get('fail_threshold',3)}{NC}")
         print()
-        print(f"  {CYAN}1{NC}  Запустить проверку сейчас")
-        print(f"  {CYAN}2{NC}  Изменить параметры Health Check")
-        print(f"  {CYAN}3{NC}  Показать лог ({_HEALTH_LOG})")
-        print()
-        print(f"  {DIM}[Q]{NC}  ← Назад")
-        print()
+        _box_item("1", "Запустить проверку сейчас")
+        _box_item("2", "Изменить параметры Health Check")
+        _box_item("3", f"Показать лог  {DIM}({_HEALTH_LOG}){NC}")
+        _box_row()
+        _box_item_exit("Q", "← Назад")
+        _box_bottom()
 
         try:
             ch = input(f"{CYAN}Выбор:{NC} ").strip().upper()

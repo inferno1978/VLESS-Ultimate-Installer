@@ -165,6 +165,11 @@ def h2_migrate_from_awg() -> dict:
         st = json.loads(STATE_FILE.read_text()) if STATE_FILE.exists() else {}
     except Exception:
         st = {}
+from vless_installer.modules.box_renderer import (
+    _box_top, _box_row, _box_item, _box_item_exit, _box_sep,
+    _box_bottom, _box_back,
+)
+
 
     awg_host = st.get("awg_exit_host", "")
     awg_port = st.get("awg_exit_port", 51820)
@@ -193,10 +198,14 @@ def do_h2_backup_menu() -> None:
     while True:
         os.system("clear")
         print()
-        print(f"{CYAN}{'═'*62}{NC}")
-        print(f"  {BOLD}💾 Hysteria2 — Бэкап конфигурации{NC}")
-        print(f"{CYAN}{'═'*62}{NC}")
-        print()
+        backups = _list_backups()
+        _box_top("💾  HYSTERIA2 — БЭКАП КОНФИГУРАЦИИ")
+        if backups:
+            _box_row(f"  Бэкапов: {CYAN}{len(backups)}{NC}  │  Последний: {DIM}{backups[0].name}{NC}  ({int(backups[0].stat().st_size/1024)} KB)")
+        else:
+            _box_row(f"  {YELLOW}Бэкапов нет{NC}")
+        _box_sep()
+        _box_row()
 
         backups = h2_backup_list()
         print(f"  Директория бэкапов: {_BACKUP_DIR}")
@@ -205,14 +214,14 @@ def do_h2_backup_menu() -> None:
             print(f"  Последний: {DIM}{backups[0].name}{NC}  "
                   f"({_fmt_size(backups[0].stat().st_size)})")
         print()
-        print(f"  {CYAN}1{NC}  Создать бэкап сейчас")
-        print(f"  {CYAN}2{NC}  Список бэкапов")
-        print(f"  {CYAN}3{NC}  Восстановить из бэкапа")
-        print(f"  {CYAN}4{NC}  Очистить старые (оставить 5)")
-        print(f"  {CYAN}5{NC}  Миграция: перенести Exit-ноду из AWG")
-        print()
-        print(f"  {DIM}[Q]{NC}  ← Назад")
-        print()
+        _box_item("1", "Создать бэкап сейчас")
+        _box_item("2", "Список бэкапов")
+        _box_item("3", "Восстановить из бэкапа")
+        _box_item("4", f"Очистить старые  {DIM}(оставить 5){NC}")
+        _box_item("5", "Миграция: перенести Exit-ноду из AWG")
+        _box_row()
+        _box_item_exit("Q", "← Назад")
+        _box_bottom()
 
         try:
             ch = input(f"{CYAN}Выбор:{NC} ").strip().upper()
@@ -229,24 +238,24 @@ def do_h2_backup_menu() -> None:
                 warn("  Бэкапов нет")
             for i, b in enumerate(backups, 1):
                 ts = datetime.fromtimestamp(b.stat().st_mtime).strftime("%d.%m %H:%M")
-                print(f"  {i:>2}. {b.name}  {DIM}{ts}  {_fmt_size(b.stat().st_size)}{NC}")
-            input(f"\n{BLUE}Нажмите Enter...{NC}")
+                _box_row(f"  {CYAN}{i:>2}{NC}. {b.name}  {DIM}{ts}  {_fmt_size(b.stat().st_size)}{NC}")
+            input(f"\n{CYAN}Нажмите Enter...{NC}")
         elif ch == "3":
             backups = h2_backup_list()
             if not backups:
                 warn("Нет бэкапов для восстановления")
-                input(f"\n{BLUE}Нажмите Enter...{NC}")
+                input(f"\n{CYAN}Нажмите Enter...{NC}")
                 continue
             print()
             for i, b in enumerate(backups, 1):
-                print(f"  {CYAN}{i}{NC}  {b.name}")
+                _box_row(f"  {CYAN}{i}{NC}  {b.name}")
             try:
                 idx = int(input(f"  {CYAN}Номер:{NC} ").strip()) - 1
             except (KeyboardInterrupt, ValueError):
                 continue
             if 0 <= idx < len(backups):
                 h2_backup_restore(backups[idx])
-            input(f"\n{BLUE}Нажмите Enter...{NC}")
+            input(f"\n{CYAN}Нажмите Enter...{NC}")
         elif ch == "4":
             n = h2_backup_cleanup()
             info(f"Удалено: {n}")

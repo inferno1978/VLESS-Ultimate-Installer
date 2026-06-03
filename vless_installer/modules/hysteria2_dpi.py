@@ -208,6 +208,11 @@ def h2_dpi_auto_fallback() -> bool:
     # Рестарт H2
     from vless_installer.modules.hysteria2_common import _systemctl
     _systemctl("restart", H2_SERVICE)
+from vless_installer.modules.box_renderer import (
+    _box_top, _box_row, _box_item, _box_item_exit, _box_sep,
+    _box_bottom, _box_back,
+)
+
 
     _tg_h2_event("h2_port_fb", f"DPI фолбэк: порт {current_ports[0]} → {best}")
     success(f"Порт успешно сменён на {best}")
@@ -237,10 +242,12 @@ def do_h2_dpi_menu() -> None:
     while True:
         os.system("clear")
         print()
-        print(f"{CYAN}{'═'*62}{NC}")
-        print(f"  {BOLD}🔍 Hysteria2 — DPI Детектор{NC}")
-        print(f"{CYAN}{'═'*62}{NC}")
-        print()
+        h2 = _load_h2_state()
+        fb = h2.get("firewall", {}).get("fallback_ports", [80, 8080, 2053])
+        _box_top("🔍  HYSTERIA2 — DPI ДЕТЕКТОР")
+        _box_row(f"  Fallback-порты: {CYAN}{fb}{NC}")
+        _box_sep()
+        _box_row()
 
         h2    = _load_h2_state()
         ports = h2.get("firewall", {}).get("udp_ports", [443])
@@ -248,13 +255,13 @@ def do_h2_dpi_menu() -> None:
         print(f"  Текущие UDP-порты:   {CYAN}{ports}{NC}")
         print(f"  Fallback-порты:      {DIM}{fb}{NC}")
         print()
-        print(f"  {CYAN}1{NC}  DPI-тест всех портов (текущие + fallback)")
-        print(f"  {CYAN}2{NC}  Автофолбэк при обнаружении блокировки")
-        print(f"  {CYAN}3{NC}  Задать список fallback-портов")
-        print(f"  {CYAN}4{NC}  Показать лог DPI")
-        print()
-        print(f"  {DIM}[Q]{NC}  ← Назад")
-        print()
+        _box_item("1", f"DPI-тест всех портов  {DIM}(текущие + fallback){NC}")
+        _box_item("2", "Автофолбэк при обнаружении блокировки")
+        _box_item("3", "Задать список fallback-портов")
+        _box_item("4", "Показать лог DPI")
+        _box_row()
+        _box_item_exit("Q", "← Назад")
+        _box_bottom()
 
         try:
             ch = input(f"{CYAN}Выбор:{NC} ").strip().upper()

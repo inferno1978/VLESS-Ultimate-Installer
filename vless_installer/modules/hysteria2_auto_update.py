@@ -37,6 +37,11 @@ from vless_installer.modules.hysteria2_common import (
 from vless_installer.modules.hysteria2_exit_mgr import (
     _detect_arch, _h2_latest_url,
 )
+from vless_installer.modules.box_renderer import (
+    _box_top, _box_row, _box_item, _box_item_exit, _box_sep,
+    _box_bottom, _box_back,
+)
+
 
 _UPDATE_CRON = Path("/etc/cron.d/hysteria2-autoupdate")
 _TMP_BINARY  = Path("/tmp/hysteria2-update.bin")
@@ -153,10 +158,13 @@ def do_h2_update_menu() -> None:
     while True:
         os.system("clear")
         print()
-        print(f"{CYAN}{'═'*62}{NC}")
-        print(f"  {BOLD}⬆️  Hysteria2 — Обновление{NC}")
-        print(f"{CYAN}{'═'*62}{NC}")
-        print()
+        h2 = _load_h2_state()
+        upd = h2.get("autoupdate", {})
+        cur_ver = _h2_binary_version() if _h2_binary_exists() else "—"
+        _box_top("⬆️  HYSTERIA2 — ОБНОВЛЕНИЕ БИНАРНИКА")
+        _box_row(f"  Версия: {CYAN}{cur_ver}{NC}  │  Автообновление: {'вкл' if upd.get('enabled') else 'выкл'}  │  Последнее: {DIM}{upd.get('last_check','—')}{NC}")
+        _box_sep()
+        _box_row()
 
         check     = h2_update_check()
         cur_color = GREEN if not check["update_available"] else YELLOW
@@ -174,15 +182,15 @@ def do_h2_update_menu() -> None:
         print()
         print(f"  Автообновление: {au_str}  │  Cron: {cron_str}")
         print()
-        print(f"  {CYAN}1{NC}  Проверить наличие обновления")
-        print(f"  {CYAN}2{NC}  Обновить сейчас")
-        print(f"  {CYAN}3{NC}  Принудительно переустановить (force)")
-        print(f"  {CYAN}4{NC}  Установить cron автообновления")
-        print(f"  {CYAN}5{NC}  Удалить cron автообновления")
-        print(f"  {CYAN}6{NC}  Вкл/Выкл автообновление")
-        print()
-        print(f"  {DIM}[Q]{NC}  ← Назад")
-        print()
+        _box_item("1", "Проверить наличие обновления")
+        _box_item("2", "Обновить сейчас")
+        _box_item("3", f"Принудительно переустановить  {DIM}(force){NC}")
+        _box_item("4", f"Установить cron автообновления")
+        _box_item("5", "Удалить cron автообновления")
+        _box_item("6", "Вкл/Выкл автообновление")
+        _box_row()
+        _box_item_exit("Q", "← Назад")
+        _box_bottom()
 
         try:
             ch = input(f"{CYAN}Выбор:{NC} ").strip().upper()

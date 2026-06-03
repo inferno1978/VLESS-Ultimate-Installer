@@ -33,6 +33,11 @@ from vless_installer.modules.hysteria2_common import (
     _tg_h2_event, _service_active, _systemctl,
     H2_SERVICE,
 )
+from vless_installer.modules.box_renderer import (
+    _box_top, _box_row, _box_item, _box_item_exit, _box_sep,
+    _box_bottom, _box_back,
+)
+
 
 _CRON_FILE    = Path("/etc/cron.d/hysteria2-watchdog")
 _SCRIPT_FILE  = Path("/usr/local/bin/h2_watchdog.sh")
@@ -157,10 +162,12 @@ def do_h2_watchdog_menu() -> None:
     while True:
         os.system("clear")
         print()
-        print(f"{CYAN}{'═'*62}{NC}")
-        print(f"  {BOLD}🔄 Hysteria2 — Watchdog / Авторестарт{NC}")
-        print(f"{CYAN}{'═'*62}{NC}")
-        print()
+        h2  = _load_h2_state()
+        wd  = h2.get("watchdog", {})
+        _box_top("🔄  HYSTERIA2 — WATCHDOG / АВТОРЕСТАРТ")
+        _box_row(f"  Watchdog: {'включён' if wd.get('enabled') else 'выключен'}  │  Падений: {CYAN}{wd.get('fail_count',0)}{NC}  │  Перезапусков: {CYAN}{wd.get('restart_count',0)}{NC}")
+        _box_sep()
+        _box_row()
 
         st = h2_watchdog_status()
         installed_str = f"{GREEN}установлен{NC}" if st["installed"] else f"{RED}не установлен{NC}"
@@ -170,14 +177,14 @@ def do_h2_watchdog_menu() -> None:
         print(f"  Сервис H2:     {service_str}")
         print(f"  Падений подряд: {YELLOW}{st['fail_count']}{NC}")
         print()
-        print(f"  {CYAN}1{NC}  Установить Watchdog (cron каждые 2 мин)")
-        print(f"  {CYAN}2{NC}  Удалить Watchdog")
-        print(f"  {CYAN}3{NC}  Запустить проверку вручную сейчас")
-        print(f"  {CYAN}4{NC}  Показать лог Watchdog")
-        print(f"  {CYAN}5{NC}  Сбросить счётчик падений")
-        print()
-        print(f"  {DIM}[Q]{NC}  ← Назад")
-        print()
+        _box_item("1", f"Установить Watchdog  {DIM}(cron каждые 2 мин){NC}")
+        _box_item("2", "Удалить Watchdog")
+        _box_item("3", "Запустить проверку вручную сейчас")
+        _box_item("4", "Показать лог Watchdog")
+        _box_item("5", "Сбросить счётчик падений")
+        _box_row()
+        _box_item_exit("Q", "← Назад")
+        _box_bottom()
 
         try:
             ch = input(f"{CYAN}Выбор:{NC} ").strip().upper()

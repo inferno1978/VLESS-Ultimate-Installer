@@ -42,6 +42,11 @@ from vless_installer.modules.hysteria2_common import (
     _run, _load_h2_state, _save_h2_state, _ensure_h2_state,
     _tg_h2_event, _is_ipv6, _bracket,
 )
+from vless_installer.modules.box_renderer import (
+    _box_top, _box_row, _box_item, _box_item_exit, _box_sep,
+    _box_bottom, _box_back,
+)
+
 
 _XRAY_CONFIG = Path("/usr/local/etc/xray/config.json")
 _XRAY_CONFIG_ALT = Path("/etc/xray/config.json")
@@ -276,30 +281,24 @@ def h2_select_transport() -> None:
     while True:
         os.system("clear")
         print()
-        print(f"{CYAN}{'═'*62}{NC}")
-        print(f"  {BOLD}🔀 Hysteria2 — Выбор транспорта Entry → Exit{NC}")
-        print(f"{CYAN}{'═'*62}{NC}")
-
         st = h2_transport_status()
         active   = st["active_transport"]
         exit_ip  = st.get("exit_ip", "")
         exit_prt = st.get("exit_port", 0)
         n_nodes  = st.get("h2_nodes", 0)
-
         col = GREEN if active == "hysteria2" else (YELLOW if active == "awg" else CYAN)
-        print(f"  Текущий транспорт: {col}{active}{NC}", end="")
-        if active == "hysteria2" and exit_ip:
-            print(f"  │  {DIM}Exit: {exit_ip}:{exit_prt}{NC}", end="")
-        print()
-        print(f"  H2 exit-нод в state: {CYAN}{n_nodes}{NC}")
-        print()
 
-        print(f"  {CYAN}1{NC}  AWG (AmneziaWG)          {DIM}Вернуть на AWG/VLESS транспорт{NC}")
-        print(f"  {CYAN}2{NC}  Hysteria2 (QUIC/UDP)     {DIM}Переключить outbound на H2{NC}")
-        print(f"  {CYAN}3{NC}  Оба (AWG + H2)           {DIM}Балансировка по весам{NC}")
-        print()
-        print(f"  {DIM}[Q]{NC}  ← Назад")
-        print()
+        _box_top("🔀  HYSTERIA2 — ВЫБОР ТРАНСПОРТА ENTRY → EXIT")
+        status_extra = f"  │  {DIM}Exit: {exit_ip}:{exit_prt}{NC}" if active == "hysteria2" and exit_ip else ""
+        _box_row(f"  Транспорт: {col}{active}{NC}{status_extra}  │  H2 нод: {CYAN}{n_nodes}{NC}")
+        _box_sep()
+        _box_row()
+        _box_item("1", f"AWG (AmneziaWG)         {DIM}Вернуть на AWG/VLESS транспорт{NC}")
+        _box_item("2", f"Hysteria2 (QUIC/UDP)    {DIM}Переключить outbound на H2{NC}")
+        _box_item("3", f"Оба (AWG + H2)          {DIM}Балансировка по весам{NC}")
+        _box_row()
+        _box_item_exit("Q", "← Назад")
+        _box_bottom()
 
         try:
             ch = input(f"{CYAN}Выбор:{NC} ").strip().upper()

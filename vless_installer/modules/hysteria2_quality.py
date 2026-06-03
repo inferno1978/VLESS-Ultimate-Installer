@@ -255,10 +255,17 @@ def do_h2_quality_menu() -> None:
     while True:
         os.system("clear")
         print()
-        print(f"{CYAN}{'═'*62}{NC}")
-        print(f"  {BOLD}📈 Hysteria2 — Качество соединения{NC}")
-        print(f"{CYAN}{'═'*62}{NC}")
-        print()
+        h2    = _load_h2_state()
+        nodes = h2.get("exit_nodes", [])
+        _box_top("📈  HYSTERIA2 — КАЧЕСТВО СОЕДИНЕНИЯ")
+        for n in nodes:
+            m   = n.get("metrics", {})
+            col = GREEN if n.get("status") == "active" else RED
+            _box_row(f"  {col}●{NC}  {n.get('ip','?'):<20}  RTT: {CYAN}{m.get('rtt_ms',0)}мс{NC}  Потери: {CYAN}{m.get('loss_pct',0):.1f}%{NC}  Скорость: {CYAN}{m.get('speed_mbps',0):.1f} Мбит/с{NC}")
+        if not nodes:
+            _box_row(f"  {YELLOW}Нет зарегистрированных нод{NC}")
+        _box_sep()
+        _box_row()
 
         h2    = _load_h2_state()
         nodes = h2.get("exit_nodes", [])
@@ -273,13 +280,13 @@ def do_h2_quality_menu() -> None:
             )
 
         print()
-        print(f"  {CYAN}1{NC}  Запустить замер качества (все ноды)")
-        print(f"  {CYAN}2{NC}  Отправить отчёт в Telegram")
-        print(f"  {CYAN}3{NC}  Авто-оптимизация параметров конфига")
-        print(f"  {CYAN}4{NC}  История метрик")
-        print()
-        print(f"  {DIM}[Q]{NC}  ← Назад")
-        print()
+        _box_item("1", f"Запустить замер качества  {DIM}(все ноды){NC}")
+        _box_item("2", "Отправить отчёт в Telegram")
+        _box_item("3", "Авто-оптимизация параметров конфига")
+        _box_item("4", "История метрик")
+        _box_row()
+        _box_item_exit("Q", "← Назад")
+        _box_bottom()
 
         try:
             ch = input(f"{CYAN}Выбор:{NC} ").strip().upper()
@@ -305,22 +312,28 @@ def do_h2_quality_menu() -> None:
                 _systemctl("restart", H2_SERVICE)
             else:
                 info("Нет изменений для оптимизации")
-            input(f"\n{BLUE}Нажмите Enter...{NC}")
+            input(f"\n{CYAN}Нажмите Enter...{NC}")
         elif ch == "4":
             hist = _load_history()
+            os.system("clear")
             print()
+            _box_top("📈  ИСТОРИЯ МЕТРИК")
             for ip, records in hist.items():
-                print(f"  {CYAN}{ip}{NC} — {len(records)} замеров")
+                _box_row(f"  {CYAN}{ip}{NC}  {DIM}— {len(records)} замеров{NC}")
                 for r in records[-5:]:
-                    print(f"    {r['ts'][:16]}  RTT={r['rtt_avg']}ms  "
-                          f"loss={r['loss_pct']}%  {r['speed_mbps']}Мбит/с")
+                    _box_row(f"    {DIM}{r['ts'][:16]}  RTT={r['rtt_avg']}ms  loss={r['loss_pct']}%  {r['speed_mbps']}Мбит/с{NC}")
+                _box_row()
             if not hist:
-                warn("История пуста — запустите замер")
-            input(f"\n{BLUE}Нажмите Enter...{NC}")
+                _box_row(f"  {YELLOW}История пуста — запустите замер{NC}")
+                _box_row()
+            _box_item_exit("0", "← Назад")
+            _box_bottom()
+            input(f"{CYAN}Нажмите Enter...{NC}")
         elif ch == "Q":
             break
         else:
             time.sleep(0.5)
+
 
 
 """
