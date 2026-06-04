@@ -65,11 +65,21 @@ fi
 
 PY_VER=$(python3 -c "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}')")
 PY_MIN_OK=$(python3 -c "import sys; print(int(sys.version_info >= (3,10)))")
+PY_312_OK=$(python3 -c "import sys; print(int(sys.version_info >= (3,12)))")
 if [[ "$PY_MIN_OK" != "1" ]]; then
     err "Требуется Python >= 3.10, найден ${PY_VER}"
     exit 1
 fi
-ok "Python ${PY_VER}: OK"
+if [[ "$PY_312_OK" != "1" ]]; then
+    warn "Python ${PY_VER} — рекомендуется 3.12+ (Ubuntu 24.04)"
+    warn "На Python < 3.12 возможны ошибки вида:"
+    warn "  SyntaxError: f-string expression part cannot include a backslash"
+    warn "  SyntaxError: f-string: unmatched '('"
+    warn "Для обновления Python: https://launchpad.net/~deadsnakes/+archive/ubuntu/ppa"
+    echo ""
+else
+    ok "Python ${PY_VER}: OK"
+fi
 
 # [4] Загрузка / обновление
 echo -e "\n${BOLD}[4/5] Загрузка VLESS Ultimate${NC}"
