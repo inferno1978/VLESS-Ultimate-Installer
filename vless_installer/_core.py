@@ -14291,10 +14291,16 @@ def _diag_check_xray_service(counters: list) -> None:
               "Xray включён в автозапуск",
               "Xray не добавлен в автозапуск", is_warn=True)
     dropin = Path("/etc/systemd/system/xray.service.d")
+    # Файлы, которые создаёт сам установщик и которые не являются ошибкой
+    KNOWN_DROPINS = {"cold-boot-restore.conf", "override.conf"}
     if dropin.exists() and any(dropin.iterdir()):
         files = [f.name for f in dropin.iterdir()]
-        _diag_err(f"Drop-in файлы systemd: {files} — переопределяют конфиг, удалите директорию")
-        counters[3] += 1
+        unknown = [f for f in files if f not in KNOWN_DROPINS]
+        if unknown:
+            _diag_err(f"Drop-in файлы systemd: {unknown} — переопределяют конфиг, удалите директорию")
+            counters[3] += 1
+        else:
+            _diag_ok(f"Drop-in файлы systemd: {files} — установлены установщиком (OK)")
     else:
         _diag_ok("Drop-in директория xray.service.d отсутствует (нет конфликтов)")
 
