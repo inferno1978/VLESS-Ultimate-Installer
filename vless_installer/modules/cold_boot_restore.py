@@ -98,7 +98,7 @@ if [ "$PROTOCOL_MODE" = "reality" ] && [ -n "$SOCKET_PATH" ] && [ "$AWG_EXIT" = 
     done
 
     if systemctl is-active --quiet nginx; then
-        systemctl restart nginx
+        sudo systemctl restart nginx
         log "nginx перезапущен (Unix-сокет: $SOCKET_PATH)"
     fi
 fi
@@ -162,6 +162,21 @@ def install_cold_boot_restore() -> tuple[bool, str]:
         # Пишем systemd override
         SYSTEMD_OVERRIDE.parent.mkdir(parents=True, exist_ok=True)
         SYSTEMD_OVERRIDE.write_text(_SYSTEMD_OVERRIDE_CONTENT, encoding="utf-8")
+
+        # Создаём лог-файл с правами пользователя xray
+        log_path = Path("/var/log/xray-cold-boot-restore.log")
+        if not log_path.exists():
+            log_path.touch()
+        _run(["chown", "xray:xray", str(log_path)])
+        log_path.chmod(0o644)
+
+        # Создаём sudoers-правило: xray может рестартовать nginx без пароля
+        sudoers_path = Path("/etc/sudoers.d/xray-nginx")
+        sudoers_path.write_text(
+            "xray ALL=(ALL) NOPASSWD: /bin/systemctl restart nginx\n",
+            encoding="utf-8"
+        )
+        sudoers_path.chmod(0o440)
 
         # Перечитываем systemd
         _run(["systemctl", "daemon-reload"])
