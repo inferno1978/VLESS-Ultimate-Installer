@@ -3667,9 +3667,11 @@ def generate_xray_config_chain_entry() -> None:
             "sniffing": {
                 "enabled":      True,
                 "destOverride": ["http", "tls"],
-                # === MERGE FROM install_split.py: metadataOnly fix (generate_xray_config_chain_entry) ===
-                "metadataOnly": True if AWG_EXIT_ENABLED else (False if SPLIT_TUNNEL_ENABLED else True),
-                # === END MERGE ===
+                # BUGFIX: metadataOnly=False required для корректной работы UseIPv6v4.
+                # При metadataOnly=True xray не читает SNI/Host из трафика → freedom получает
+                # IP вместо домена → UseIPv6v4 domainStrategy не применяется → IPv6 недоступен.
+                # AWG использует маршрутизацию ядра и не зависит от sniffing доменов.
+                "metadataOnly": False,
                 "routeOnly":    True,
             },
             "streamSettings": {
@@ -4769,13 +4771,11 @@ def generate_xray_config_chain_entry_multi() -> None:
             "sniffing": {
                 "enabled":      True,
                 "destOverride": ["http", "tls"],
-                # === MERGE FROM install_split.py: metadataOnly fix (Режим B, VLESS каскад) ===
-                # При AWG_EXIT_ENABLED — True (AWG использует маршрутизацию ядра, домены не нужны).
-                # При SPLIT_TUNNEL_ENABLED без AWG — False обязателен: Xray должен читать
-                # реальные домены из TLS SNI/HTTP Host для geosite:category-ru правил.
-                # metadataOnly=True блокирует чтение доменов → split tunnel не работает.
-                "metadataOnly": True if AWG_EXIT_ENABLED else (False if SPLIT_TUNNEL_ENABLED else True),
-                # === END MERGE ===
+                # BUGFIX: metadataOnly=False required для корректной работы UseIPv6v4.
+                # При metadataOnly=True xray не читает SNI/Host из трафика → freedom получает
+                # IP вместо домена → UseIPv6v4 domainStrategy не применяется → IPv6 недоступен.
+                # AWG использует маршрутизацию ядра и не зависит от sniffing доменов.
+                "metadataOnly": False,
                 "routeOnly":    True,
             },
             "streamSettings": {
