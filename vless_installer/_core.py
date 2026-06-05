@@ -3639,7 +3639,7 @@ def generate_xray_config_chain_entry() -> None:
                 "enabled":      True,
                 "destOverride": ["http", "tls"],
                 "metadataOnly": False,
-                "routeOnly":    True,
+                "routeOnly":    False,
             },
             "streamSettings": {
                 "network":       "xhttp",
@@ -3671,7 +3671,7 @@ def generate_xray_config_chain_entry() -> None:
                 # Базовый VLESS/REALITY: metadataOnly=False обязателен — xray должен читать SNI/Host
                 # чтобы freedom мог резолвить домены и применять UseIPv6v4 domainStrategy.
                 "metadataOnly": True if AWG_EXIT_ENABLED else False,
-                "routeOnly":    True,
+                "routeOnly":    False,
             },
             "streamSettings": {
                 "network": "tcp",
@@ -4741,7 +4741,7 @@ def generate_xray_config_chain_entry_multi() -> None:
                 "enabled":      True,
                 "destOverride": ["http", "tls"],
                 "metadataOnly": False,
-                "routeOnly":    True,
+                "routeOnly":    False,
             },
             "streamSettings": {
                 "network":       "xhttp",
@@ -4774,7 +4774,7 @@ def generate_xray_config_chain_entry_multi() -> None:
                 # Базовый VLESS/REALITY: metadataOnly=False обязателен — xray должен читать SNI/Host
                 # чтобы freedom мог резолвить домены и применять UseIPv6v4 domainStrategy.
                 "metadataOnly": True if AWG_EXIT_ENABLED else False,
-                "routeOnly":    True,
+                "routeOnly":    False,
             },
             "streamSettings": {
                 "network": "tcp",
@@ -7101,7 +7101,7 @@ def generate_xray_config() -> None:
                 # Базовый VLESS/REALITY: metadataOnly=False обязателен — xray должен читать SNI/Host
                 # чтобы freedom мог резолвить домены и применять UseIPv6v4 domainStrategy.
                 "metadataOnly": True if AWG_EXIT_ENABLED else False,
-                "routeOnly":    True,
+                "routeOnly":    False,
             },
             "streamSettings": {
                 "network": "tcp",
@@ -7272,7 +7272,7 @@ def generate_xray_config_xhttp() -> None:
                 "enabled":      True,
                 "destOverride": ["http", "tls"],
                 "metadataOnly": False,
-                "routeOnly":    True,
+                "routeOnly":    False,
             },
             "streamSettings": {
                 "network":       "xhttp",
