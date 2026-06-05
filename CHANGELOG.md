@@ -2,6 +2,43 @@
 
 ---
 
+## 🐛 v4.12.7 — 5 июня 2026 — Совместимость nginx с Ubuntu 22.04
+
+### Исправлено
+
+---
+
+#### nginx: unknown directive "ssl_reject_handshake" на Ubuntu 22.04
+
+**Симптом:** На Ubuntu 22.04 установщик падал с ошибкой:
+```
+nginx: [emerg] unknown directive "ssl_reject_handshake"
+```
+
+**Причина:** Директива `ssl_reject_handshake` появилась в nginx 1.19.4.
+На Ubuntu 22.04 из стандартного репо устанавливается nginx 1.18.0 — директива
+не поддерживается.
+
+**Исправление:** Добавлена проверка версии nginx при генерации конфига:
+- nginx ≥ 1.19.4 → `ssl_reject_handshake on;` (как раньше)
+- nginx < 1.19.4 → `return 444;` (функционально эквивалентно — соединение отклоняется)
+
+---
+
+#### nginx: конфиг из sites-enabled не загружался при установке из nginx.org репо
+
+**Симптом:** При установке nginx из официального репо nginx.org конфиг сайта
+не применялся — nginx игнорировал `/etc/nginx/sites-enabled/`.
+
+**Причина:** nginx из репо nginx.org использует только `conf.d/` и не включает
+`sites-enabled/` в `nginx.conf` по умолчанию (в отличие от пакета из Ubuntu репо).
+
+**Исправление:** Добавлена функция `_ensure_nginx_sites_enabled_include()` которая
+при каждой настройке nginx проверяет `/etc/nginx/nginx.conf` и добавляет строку
+`include /etc/nginx/sites-enabled/*;` после `include conf.d/` если она отсутствует.
+
+---
+
 ## 🐛 v4.12.6 — 5 июня 2026 — Фикс IPv6 через прокси (routeOnly: False)
 
 ### Исправлено
