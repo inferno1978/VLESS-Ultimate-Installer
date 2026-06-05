@@ -1,6 +1,6 @@
-# VLESS Ultimate Installer v4.12.4
+# VLESS Ultimate Installer v4.12.5
 
-[![Version](https://img.shields.io/badge/version-4.12.4-blue.svg)](https://github.com/inferno1978/VLESS-Ultimate-Installer)
+[![Version](https://img.shields.io/badge/version-4.12.5-blue.svg)](https://github.com/inferno1978/VLESS-Ultimate-Installer)
 [![Python](https://img.shields.io/badge/python-3.10%2B-green.svg)](https://python.org)
 [![License](https://img.shields.io/badge/license-MIT-orange.svg)](https://github.com/inferno1978/VLESS-Ultimate-Installer/blob/main/LICENSE)
 [![Platform](https://img.shields.io/badge/platform-Ubuntu%20%7C%20Debian-lightgrey.svg)](https://ubuntu.com)
@@ -14,7 +14,7 @@
 ╚██╗ ██╔╝██║     ██╔══╝  ╚════██║╚════██║
  ╚████╔╝ ███████╗███████╗███████║███████║
   ╚═══╝  ╚══════╝╚══════╝╚══════╝╚══════╝
-  Ultimate Installer v4.12.4
+  Ultimate Installer v4.12.5
 ```
 
 ## ⚡ Быстрый старт
@@ -137,7 +137,7 @@ VLESS-Ultimate-Installer/
 │                                                             │
 │  bootstrap.sh ──► main.py ──exec──► _core.py                │
 │                                         │                   │
-│                               modules/ (v4.12.4)            │
+│                               modules/ (v4.12.5)            │
 │                                         │                   │
 │         Xray-core              Nginx (TLS)                  │
 │         /etc/xray/             /etc/nginx/                  │
