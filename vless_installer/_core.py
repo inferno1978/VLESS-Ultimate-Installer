@@ -22947,7 +22947,7 @@ for svc in ('xray','nginx'):
     ok = _run(['systemctl','is-active',svc]).stdout.strip() == 'active'
     _icon = chr(9989) if ok else chr(10060)
     _status = 'активен' if ok else 'НЕ АКТИВЕН'
-    lines.append(f'{_icon} {svc}: {_status}')
+    lines.append(f'{{_icon}} {{svc}}: {{_status}}')
 domain = ''
 try:
     if STATE_FILE.exists():
