@@ -2,6 +2,34 @@
 
 ---
 
+## 🐛 v4.12.6 — 5 июня 2026 — Фикс IPv6 через прокси (routeOnly: False)
+
+### Исправлено
+
+---
+
+#### IPv6 не работал через прокси несмотря на выбор UseIPv6v4
+
+**Симптом:** После установки и выбора стратегии `UseIPv6v4` IPv6 через прокси не появлялся.
+Помогал только ручной патч конфига с последующим рестартом xray.
+
+**Причина:** Во всех VLESS inbound-блоках стояло `routeOnly: True`. Это означает что xray
+применял роутинг на основе снифинга, но **не переписывал destination** при передаче в outbound.
+В результате freedom outbound получал уже резолвленный IPv4-адрес вместо доменного имени,
+и `domainStrategy: UseIPv6v4` не мог сделать свою работу — домен резолвить не нужно,
+IP уже есть, и он IPv4.
+
+**Исправление:** `routeOnly: False` во всех 6 VLESS/REALITY inbound-блоках:
+- `generate_xray_config()` — Режим A, REALITY
+- `generate_xray_config_xhttp()` — Режим A, xHTTP
+- `generate_xray_config_chain_entry()` — Режим B, entry нода
+- `generate_xray_config_chain_entry_multi()` — Режим B, multi-entry
+
+**Совместимость:** AWG не затронут (`metadataOnly: True` для AWG сохранён).
+Telemt tproxy (dokodemo-door) не затронут — у него `sniffing: disabled`.
+
+---
+
 ## 🐛 v4.12.5 — 5 июня 2026 — IPv6 не работал через прокси (metadataOnly: True)
 
 ### Исправлено
