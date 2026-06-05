@@ -7097,7 +7097,10 @@ def generate_xray_config() -> None:
             "sniffing": {
                 "enabled":      True,
                 "destOverride": ["http", "tls"],
-                "metadataOnly": True,
+                # AWG использует маршрутизацию ядра — sniffing доменов не нужен (metadataOnly=True).
+                # Базовый VLESS/REALITY: metadataOnly=False обязателен — xray должен читать SNI/Host
+                # чтобы freedom мог резолвить домены и применять UseIPv6v4 domainStrategy.
+                "metadataOnly": True if AWG_EXIT_ENABLED else False,
                 "routeOnly":    True,
             },
             "streamSettings": {
