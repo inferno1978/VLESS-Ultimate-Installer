@@ -2,6 +2,51 @@
 
 ---
 
+## 🛠 v4.12.7 — 6 июня 2026 — Хотфиксы Ubuntu 22.04
+
+### Исправлено
+
+---
+
+#### nginx: default server без сертификатов при `return 444` (nginx < 1.19.4)
+
+**Симптом:** На Ubuntu 22.04 (nginx 1.18.0) nginx не запускался после установки:
+```
+nginx: [emerg] no ssl configured for the server
+```
+
+**Причина:** Предыдущий фикс (`ssl_reject_handshake` → `return 444`) был неполным.
+Директива `listen ... ssl` **всегда** требует `ssl_certificate` и `ssl_certificate_key` —
+кроме случая когда присутствует `ssl_reject_handshake on;`, которая специально снимает
+это требование. Без неё nginx падал даже с `return 444`.
+
+**Исправление:** Для nginx < 1.19.4 в default server блок теперь добавляются те же
+сертификаты что и в основном блоке:
+- nginx ≥ 1.19.4 → `ssl_reject_handshake on;` (как раньше)
+- nginx < 1.19.4 → `ssl_certificate` + `ssl_certificate_key` + `return 444;`
+
+---
+
+#### xray: `config.json` создавался без прав для пользователя `xray`
+
+**Симптом:** На Ubuntu 22.04 xray не запускался сразу после установки:
+```
+xray[...]: Failed to start: failed to load config files: ... failed to read config: open /usr/local/etc/xray/config.json
+```
+Помогал только ручной `chown xray:xray /etc/xray/*`.
+
+**Причина:** В двух функциях генерации конфига (`generate_xray_config_chain_entry`,
+`generate_xray_config_chain_entry_multi`) `chown` после записи `config.json` не вызывался
+вообще. В двух других (`generate_xray_config`, `generate_xray_config_xhttp`) использовался
+`_run(["chown", "root:xray", ...], check=False)` — тихо падал без предупреждения если
+группа `xray` ещё не была создана в нужный момент.
+
+**Исправление:** Во всех 4 функциях сразу после `cfg_file.write_text(...)` вызывается
+`_set_config_owner(cfg_file)` — надёжная функция через `grp.getgrnam` + `os.chown`,
+с fallback на `644` при отсутствии группы `xray`.
+
+---
+
 ## 🚀 v4.12.7 — 6 июня 2026 — Интерактивный выбор TLS Fingerprint
 
 ### Добавлено
