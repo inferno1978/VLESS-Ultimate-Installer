@@ -456,10 +456,27 @@ def _patch_config_middle_proxy(
                 count=1,
             )
 
-        # Управляем [dc_overrides]: при direct-режиме добавляем override DC2
+        # Управляем [dc_overrides]: при direct-режиме прописываем все Telegram DC.
+        # Адреса актуальны для Telemt v3.x (Direct Mode без Middle Proxy).
+        # Список охватывает DC1–DC5, их зеркала (-1..-5) и специальные (-203/203).
+        # Источник: официальная документация Telegram / публичные MTProto-адреса.
+        _DC_OVERRIDES = (
+            '"1"    = "149.154.175.50:443"\n'
+            '"2"    = "149.154.167.51:443"\n'
+            '"3"    = "149.154.175.100:443"\n'
+            '"4"    = "149.154.167.91:443"\n'
+            '"5"    = "91.108.4.100:443"\n'
+            '"-1"   = "149.154.175.50:443"\n'
+            '"-2"   = "149.154.167.51:443"\n'
+            '"-3"   = "149.154.175.100:443"\n'
+            '"-4"   = "149.154.167.91:443"\n'
+            '"-5"   = "91.108.4.100:443"\n'
+            '"203"  = "91.105.192.100:443"\n'
+            '"-203" = "91.105.192.100:443"\n'
+        )
         if not enable:
             if "[dc_overrides]" not in new_text:
-                new_text = new_text.rstrip() + '\n\n[dc_overrides]\n"203" = "91.105.192.100:443"\n'
+                new_text = new_text.rstrip() + '\n\n[dc_overrides]\n' + _DC_OVERRIDES
         else:
             # При возврате в Middle Proxy убираем dc_overrides
             lines = new_text.splitlines()
