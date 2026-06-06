@@ -1406,7 +1406,27 @@ def _run_install_inner(server_ip: str, server_ipv6: str) -> None:
         port = 8443
 
     tls_domain = _select_domain()
-    use_mp     = _is_direct_ip(server_ip)
+    # ── Регион сервера: РФ / страна с блокировкой Telegram ─────────────────
+    # _is_direct_ip() возвращает True если IP напрямую на интерфейсе (не NAT).
+    # Это не означает доступность ME-серверов: в РФ они заблокированы.
+    # Явный вопрос позволяет сразу ставить use_middle_proxy=false и
+    # избежать варнингов "All ME servers for DC failed" в логах.
+    _direct_ip = _is_direct_ip(server_ip)
+    _banner()
+    _box_top("РЕГИОН СЕРВЕРА")
+    _box_row()
+    _box_info("Telegram заблокирован в РФ и ряде других стран.")
+    _box_info("В таком регионе Middle Proxy недоступен — нужен Direct Mode.")
+    _box_row()
+    _box_item("Y", f"Да, сервер в РФ / регионе с блокировкой  {GREEN}(Direct Mode){NC}")
+    _box_item("N", f"Нет, Telegram доступен напрямую  {DIM}(Middle Proxy){NC}")
+    _box_bot(); print()
+    _region_blocked = _ask(
+        f"{CYAN}Telegram заблокирован на этом сервере? [Y/n]: {NC}",
+        default="y", c=True,
+    ).strip().lower()
+    # При блокировке — принудительно Direct; иначе — автоопределение по IP
+    use_mp = False if _region_blocked in ("y", "") else _direct_ip
 
     # ── Настройка гибридного fallback (Middle Proxy → Direct) ────────────────
     # Шаг показывается только если use_mp=True (Middle Proxy актуален).
