@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
-# === v4.12.6 ===
+# === v4.12.7 ===
 """
-VLESS + TCP + REALITY + xHTTP TLS — Ultimate Installer v4.12.6
+VLESS + TCP + REALITY + xHTTP TLS — Ultimate Installer v4.12.7
 Python 3.12+ port
 
 Поддержка: Ubuntu 20.04/22.04/24.04, Debian 11/12/13
@@ -58,7 +58,7 @@ from datetime import datetime, timezone
 from typing import Any
 import getpass
 
-# ── Модули v4.12.6 ──────────────────────────────────────────────────────────────
+# ── Модули v4.12.7 ──────────────────────────────────────────────────────────────
 from vless_installer.modules.smoke_test      import smoke_test_xray
 from vless_installer.modules.xray_safe_apply import xray_apply_with_smoke
 from vless_installer.modules.nginx_watchdog  import (
@@ -84,6 +84,10 @@ import vless_installer.modules.box_renderer as _br
 _BOX_W = _br._BOX_W  # алиас для совместимости с кодом в _core.py
 from vless_installer.modules.logrotate  import do_manage_logrotate
 from vless_installer.modules.dns_rules         import do_manage_dns_rules
+from vless_installer.modules.fingerprint_manager import (
+    XRAY_FP_LIST  as _FM_FP_LIST,
+    prompt_fingerprint as _fm_prompt_fingerprint,
+)
 from vless_installer.modules.dnscrypt_selector import do_dnscrypt_selector_menu
 from vless_installer.modules.honeypot      import do_manage_honeypot
 from vless_installer.modules.scheduler     import render_scheduler_menu
@@ -120,7 +124,7 @@ from vless_installer.modules.fragment_mux        import do_fragment_mux_menu
 from vless_installer.modules.fragment_watchdog   import do_fragment_watchdog_menu
 from vless_installer.modules.fragment_stats      import do_fragment_stats_menu
 from vless_installer.modules.fragment_share      import do_fragment_share_menu
-# ── Hysteria2 transport (аддитивно, v4.12.6+) ────────────────────────────────
+# ── Hysteria2 transport (аддитивно, v4.12.7+) ────────────────────────────────
 from vless_installer.modules.hysteria2_menu      import do_hysteria2_menu
 # ── Новые модули (бэкап, cold boot, health monitor) ──────────────────────────
 from vless_installer.modules.config_backup       import backup_xray_config, do_backup_menu
@@ -221,7 +225,7 @@ def die(msg: str) -> None:
     sys.exit(1)
 
 
-log_to_file("INFO", "=== Запуск VLESS Ultimate Installer v4.12.6 ===")
+log_to_file("INFO", "=== Запуск VLESS Ultimate Installer v4.12.7 ===")
 log_to_file("INFO", f"Время начала: {datetime.now()}")
 
 # =============================================================================
@@ -248,7 +252,7 @@ def _make_banner() -> str:
         "  ╚═══╝  ╚══════╝╚══════╝╚══════╝╚══════╝",
     ]
     _info_lines = [
-        "VLESS REALITY + xHTTP TLS INSTALLER v4.12.6",
+        "VLESS REALITY + xHTTP TLS INSTALLER v4.12.7",
         "IPv6 DualStack | 6 Templates | SHA256 Verify",
         "Balancer: RoundRobin | LeastPing | LeastLoad",
         "Dashboard | FP Rotate | GeoCheck | Multi-User",
@@ -493,6 +497,7 @@ PARAM_SOCKET_PATH:     str  = ""
 PARAM_REALITY_DEST:    str  = ""   # dest/sni для REALITY при AWG-транспорте (чужой сайт, напр. www.microsoft.com)
 PARAM_DOMAIN_STRATEGY: str  = ""
 PARAM_SITE_TEMPLATE:   str  = ""
+PARAM_FINGERPRINT:     str  = "chrome"   # TLS/uTLS fingerprint, выбирается при установке
 PRIVATE_KEY_MODE:      str  = "auto"
 
 ROLLBACK_AVAILABLE: bool = False
@@ -2130,7 +2135,7 @@ def prompt_parameters() -> None:
     success(f"   Шаблон: {tmpl_names[int(PARAM_SITE_TEMPLATE)]}")
 
     # --- 10. DNSCrypt-proxy ---
-    _box_top(f" {BLUE}[10/10] DNSCrypt-proxy (зашифрованный DNS):{NC}")
+    _box_top(f" {BLUE}[10/11] DNSCrypt-proxy (зашифрованный DNS):{NC}")
     _box_item("Y", f"Установить DNSCrypt-proxy {GREEN}(рекомендуется){NC}")
     _box_desc(f"Шифрует DNS-запросы, защищает от слежки провайдера")
     _box_item("N", f"Использовать публичные DNS напрямую (1.1.1.1 / 8.8.8.8)")
@@ -2152,6 +2157,14 @@ def prompt_parameters() -> None:
             info("   DNSCrypt-proxy: пропускаем, используем публичные DNS")
             break
         warn("   Введите Y или N")
+
+    # --- 11. Fingerprint ---
+    global PARAM_FINGERPRINT
+    _box_top(f" {BLUE}[11/11] TLS Fingerprint (uTLS):{NC}")
+    _box_row(f"   Определяет, под какой браузер маскируется TLS-хендшейк клиента.")
+    _box_row(f"   Влияет на обход DPI. Должен совпадать в клиенте и на сервере.")
+    _box_bottom()
+    PARAM_FINGERPRINT = _fm_prompt_fingerprint(current=PARAM_FINGERPRINT)
 
     # --- Сводка ---
     _box_bottom()
@@ -3173,22 +3186,10 @@ def prompt_chain_params() -> None:
         warn("   Некорректный домен")
 
     # Fingerprint
-    _box_row(f"{BLUE}[E7] Fingerprint браузера [chrome]:{NC}")
-    fp_opts = {"1": "chrome", "2": "firefox", "3": "safari", "4": "edge"}
-    _box_sep()
-    _box_item("1", f"chrome  {CYAN}[2]{NC} firefox  {CYAN}[3]{NC} safari  {CYAN}[4]{NC} edge")
+    global CHAIN_EXIT_FP
+    _box_row(f"{BLUE}[E7] Fingerprint браузера:{NC}")
     _box_bottom()
-    while True:
-        try:
-            v = input("   Выбор [1]: ").strip() or "1"
-        except KeyboardInterrupt:
-            print()
-            raise
-        if v in fp_opts:
-            CHAIN_EXIT_FP = fp_opts[v]
-            success(f"   Fingerprint: {CHAIN_EXIT_FP}")
-            break
-        warn("   Введите 1-4")
+    CHAIN_EXIT_FP = _fm_prompt_fingerprint(label="Exit Node", current=CHAIN_EXIT_FP or "chrome")
 
     _box_row(f"{BOLD}Параметры Exit Node:{NC}")
     _box_row(f"  Host:    {CHAIN_EXIT_HOST}:{CHAIN_EXIT_PORT}")
@@ -4148,8 +4149,6 @@ def _prompt_one_node(index: int) -> dict | None:
       [M] — ввод параметров вручную по полям
     Возвращает dict или None, если пользователь отменил.
     """
-    fp_opts = {"1": "chrome", "2": "firefox", "3": "safari", "4": "edge"}
-
     _box_top(f"Параметры Exit Node #{index}")
     _box_row(f"  {YELLOW}На зарубежном VPS должен быть установлен этот же скрипт в Режиме A.{NC}")
     _box_row(f"  Введите {CYAN}0{NC} для отмены.")
@@ -4354,8 +4353,6 @@ def _fix_node_fields(index: int, parsed: dict) -> dict | None:
 
 def _prompt_one_node_manual(index: int) -> dict | None:
     """Ввод параметров exit-ноды вручную по полям."""
-    fp_opts = {"1": "chrome", "2": "firefox", "3": "safari", "4": "edge"}
-
     _box_top(f"Ручной ввод Exit Node #{index}")
     _box_row(f"  Введите {CYAN}0{NC} в любом поле для отмены.")
     _box_row()
@@ -4521,20 +4518,9 @@ def _prompt_one_node_manual(index: int) -> dict | None:
         warn("   Некорректный домен")
 
     # Fingerprint
-    _box_row(f"{BLUE}[E8] Fingerprint браузера [chrome]:{NC}")
-    _box_sep()
-    _box_item("1", f"chrome  {CYAN}[2]{NC} firefox  {CYAN}[3]{NC} safari  {CYAN}[4]{NC} edge")
+    _box_row(f"{BLUE}[E8] Fingerprint браузера:{NC}")
     _box_bottom()
-    while True:
-        try:
-            v = input("   Выбор [1]: ").strip() or "1"
-        except KeyboardInterrupt:
-            print()
-            raise
-        if v in fp_opts:
-            fp = fp_opts[v]
-            break
-        warn("   Введите 1–4")
+    fp = _fm_prompt_fingerprint(label=f"Exit Node #{index}", current="chrome")
 
     node = {
         "host":       host,
@@ -5563,14 +5549,14 @@ def generate_chain_summary() -> None:
             f"vless://{PARAM_UUID}@{entry_host}:{SERVER_PORT}"
             f"?type=xhttp&security=tls&sni={PARAM_DOMAIN}"
             f"&path={_path_enc}&mode={XHTTP_MODE}"
-            f"&fp=chrome#{_chain_label}"
+            f"&fp={PARAM_FINGERPRINT or 'chrome'}#{_chain_label}"
         )
     else:
         _reality_sni = PARAM_REALITY_DEST if AWG_EXIT_ENABLED else PARAM_DOMAIN
         link = (
             f"vless://{PARAM_UUID}@{entry_host}:{SERVER_PORT}"
             f"?type=tcp&security=reality&pbk={PARAM_PUBLIC_KEY}"
-            f"&fp=chrome&sni={_reality_sni}&sid={PARAM_SHORTID}"
+            f"&fp={PARAM_FINGERPRINT or 'chrome'}&sni={_reality_sni}&sid={PARAM_SHORTID}"
             f"&flow=xtls-rprx-vision#{_chain_label}"
         )
 
@@ -5851,7 +5837,7 @@ def install_dnscrypt() -> None:
         'server_names = ["cloudflare", "google"]'
     )
     DNSCRYPT_CONF.write_text(textwrap.dedent(f"""\
-        ## dnscrypt-proxy.toml — сгенерирован VLESS Ultimate Installer v4.12.6
+        ## dnscrypt-proxy.toml — сгенерирован VLESS Ultimate Installer v4.12.7
         ## Слушает на {DNSCRYPT_LISTEN_ADDR}:{DNSCRYPT_LISTEN_PORT}
 
         listen_addresses = ['{DNSCRYPT_LISTEN_ADDR}:{DNSCRYPT_LISTEN_PORT}']
@@ -9264,6 +9250,22 @@ def _install_autoupdate_service() -> None:
 # =============================================================================
 #  УПРАВЛЕНИЕ ПОЛЬЗОВАТЕЛЯМИ
 # =============================================================================
+def _fp_from_state() -> str:
+    """Возвращает fingerprint из state.json (или глобального PARAM_FINGERPRINT).
+
+    Используется при генерации ссылок постфактум (добавление пользователей,
+    вывод ссылок), когда PARAM_FINGERPRINT может быть не заполнен (например,
+    при запуске installer.py не в режиме установки).
+    """
+    if PARAM_FINGERPRINT:
+        return PARAM_FINGERPRINT
+    try:
+        _st = json.loads(STATE_FILE.read_text())
+        return _st.get("fingerprint", "chrome") or "chrome"
+    except Exception:
+        return "chrome"
+
+
 def _users_get_config() -> Path:
     for p in (Path("/etc/xray/config.json"),
               Path("/usr/local/etc/xray/config.json")):
@@ -9301,10 +9303,11 @@ def _users_gen_link(cfg: Path, uuid_str: str, email: str) -> str:
             path   = xhttp_s.get("path", "/")
             mode   = xhttp_s.get("mode", "streamup")
             path_enc = urllib.parse.quote(path, safe="/")
+            _fp = _fp_from_state()
             return (f"vless://{uuid_str}@{domain}:{port}"
                     f"?type=xhttp&security=tls&sni={domain}"
                     f"&path={path_enc}&mode={mode}"
-                    f"&fp=chrome#{label}")
+                    f"&fp={_fp}#{label}")
         else:
             rs     = ss.get("realitySettings", {})
             sni    = (rs.get("serverNames") or [""])[0]
@@ -9313,9 +9316,10 @@ def _users_gen_link(cfg: Path, uuid_str: str, email: str) -> str:
             sid    = sids[0] if sids else ""
             # host — реальный адрес сервера (PARAM_DOMAIN или IP), sni — домен маскировки
             host   = PARAM_DOMAIN or get_server_ip("4") or sni
+            _fp = _fp_from_state()
             return (f"vless://{uuid_str}@{host}:{port}"
                     f"?type=tcp&security=reality&pbk={pbk}"
-                    f"&fp=chrome&sni={sni}&sid={sid}"
+                    f"&fp={_fp}&sni={sni}&sid={sid}"
                     f"&flow=xtls-rprx-vision#{label}")
     except Exception as e:
         log_to_file("WARN", str(e))
@@ -9620,7 +9624,7 @@ def generate_client_links() -> None:
     print()
     _box_top(f"Ссылки для подключения")
     _box_row()
-    fp = "chrome"
+    fp = PARAM_FINGERPRINT or "chrome"
     proto = PROTOCOL_MODE  # "reality" или "xhttp"
     # При AWG SNI = домен маскировки, при обычном REALITY SNI = собственный домен
     _sni = PARAM_REALITY_DEST if (AWG_EXIT_ENABLED and PARAM_REALITY_DEST) else PARAM_DOMAIN
@@ -13189,6 +13193,7 @@ def do_full_install() -> None:
         "email":          PARAM_EMAIL,
         "ipv6":           IPV6_PREFLIGHT,
         "use_dnscrypt":   PARAM_USE_DNSCRYPT,
+        "fingerprint":    PARAM_FINGERPRINT,
         "split_tunnel":   SPLIT_TUNNEL_ENABLED,
         "split_extra_domains": SPLIT_TUNNEL_EXTRA_DOMAINS,
         "split_extra_ips":     SPLIT_TUNNEL_EXTRA_IPS,
@@ -15116,7 +15121,7 @@ def do_live_traffic_dashboard() -> None:
 # ---------------------------------------------------------------------------
 #  2. АВТО-СМЕНА TLS FINGERPRINT ПО РАСПИСАНИЮ
 # ---------------------------------------------------------------------------
-_FP_LIST = ["chrome", "firefox", "safari", "edge", "ios", "android", "random"]
+_FP_LIST = _FM_FP_LIST  # единый авторитетный список из fingerprint_manager.py
 
 _FP_SCHEDULE_FILE = Path("/etc/xray/fp_schedule.json")
 _FP_CRON_SCRIPT   = Path("/usr/local/bin/xray-fp-rotate.sh")
@@ -15169,7 +15174,8 @@ def _fp_patch_config(new_fp: str) -> bool:
 
 def _fp_install_cron(interval_hours: int) -> None:
     """Устанавливает cron-скрипт для ротации fingerprint."""
-    fp_list_str = " ".join(_FP_LIST[:-1])  # без "random" в списке — он зарезервирован
+    _FP_ROTATE_EXCLUDE = {"random", "randomized", "none"}
+    fp_list_str = " ".join(fp for fp in _FP_LIST if fp not in _FP_ROTATE_EXCLUDE)  # только реальные браузеры
     script_content = textwrap.dedent(f"""\
         #!/bin/bash
         # Авто-смена TLS fingerprint для Xray (установлено VLESS Installer)
@@ -15279,7 +15285,8 @@ def do_manage_fingerprint() -> None:
                 time.sleep(1)
                 continue
             if new_fp == "random":
-                new_fp = random.choice(_FP_LIST[:-1])
+                _fp_real = [fp for fp in _FP_LIST if fp not in {"random", "randomized", "none"}]
+                new_fp = random.choice(_fp_real)
                 info(f"Random → выбран: {new_fp}")
 
             # Патчим конфиг
@@ -15784,11 +15791,12 @@ def do_manage_users() -> None:
                         _ul_sni = domain
 
                     if proto == "reality":
+                        _ul_fp = st.get("fingerprint", "chrome") or "chrome"
                         link = (
                             f"vless://{u['uuid']}@{server_ip}:{port}"
                             f"?encryption=none&flow=xtls-rprx-vision"
                             f"&security=reality&sni={_ul_sni}"
-                            f"&fp=chrome&pbk={pub_key}&sid={short_id}"
+                            f"&fp={_ul_fp}&pbk={pub_key}&sid={short_id}"
                             f"&spx={spiderx}&type=tcp"
                             f"#{u.get('name','user')}"
                         )
@@ -24568,7 +24576,7 @@ def _fetch_prefixes_for_asn(asn: str) -> list:
         for attempt in range(1, 4):   # до 3 попыток на каждый URL
             try:
                 req = urllib.request.Request(url, headers={
-                    "User-Agent": "xray-installer/4.12.6",
+                    "User-Agent": "xray-installer/4.12.7",
                     "Accept":     "application/json",
                 })
                 with urllib.request.urlopen(req, timeout=30) as resp:
@@ -29834,7 +29842,7 @@ def main_menu() -> None:
             _BOX_W_saved = _BOX_W
             _BOX_W = 64
             _box_top()
-            _box_row(f"  {BOLD}{TITLE}VLESS Ultimate Installer v4.12.6{NC}  {DIM}│{NC}  {mode_str}")
+            _box_row(f"  {BOLD}{TITLE}VLESS Ultimate Installer v4.12.7{NC}  {DIM}│{NC}  {mode_str}")
             _box_sep()
             _box_row()
             _box_row(f"  {CYAN}1{NC}  ⚙️  {TITLE}Установка и Система{NC}")
