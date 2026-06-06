@@ -99,7 +99,8 @@ nginx: [emerg] unknown directive "ssl_reject_handshake"
 
 **Исправление:** Добавлена проверка версии nginx при генерации конфига:
 - nginx ≥ 1.19.4 → `ssl_reject_handshake on;` (как раньше)
-- nginx < 1.19.4 → `return 444;` (функционально эквивалентно — соединение отклоняется)
+- nginx < 1.19.4 → `ssl_certificate` + `ssl_certificate_key` + `return 444;`
+  (сертификаты обязательны при `listen ... ssl` без `ssl_reject_handshake`, иначе nginx не запустится)
 
 ---
 

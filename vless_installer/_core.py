@@ -8062,7 +8062,9 @@ def setup_nginx_final() -> None:
         server {{
             {listen_default}
             server_name _;
-            {"ssl_reject_handshake on;" if (nginx_major > 1 or (nginx_major == 1 and nginx_minor >= 19)) else "return 444;"}
+            {"ssl_reject_handshake on;" if (nginx_major > 1 or (nginx_major == 1 and nginx_minor >= 19)) else f"""ssl_certificate     /etc/letsencrypt/live/{PARAM_DOMAIN}/fullchain.pem;
+            ssl_certificate_key /etc/letsencrypt/live/{PARAM_DOMAIN}/privkey.pem;
+            return 444;"""}
         }}
     """))
 
