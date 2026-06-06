@@ -474,7 +474,7 @@ def get_status_text():
     except Exception:
         up = ""
     ts = datetime.now().strftime("%d.%m.%Y %H:%M")
-    return (f"📊 <b>Статус [{host}]</b>\\n\\n"
+    return (f"📊 <b>Статус [{{host}}]</b>\\n\\n"
             f"Xray: {{xs}}\\n"
             f"Протокол: {{st.get('protocol_mode','?').upper()}}\\n"
             f"Порт: {{st.get('server_port','?')}}\\n"
