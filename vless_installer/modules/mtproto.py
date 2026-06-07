@@ -475,7 +475,15 @@ def _write_config(port, ipv4, ipv6, tls_domain, users, use_middle_proxy,
     else:
         lines += ["", "[[upstreams]]", 'type = "direct"', "enabled = true", "weight = 10"]
     if not use_middle_proxy:
-        lines += ["", "[dc_overrides]", '"203" = "91.105.192.100:443"']
+        lines += [
+            "", "[dc_overrides]",
+            '"1"   = "149.154.175.50:443"',
+            '"2"   = "149.154.167.51:443"',
+            '"3"   = "149.154.175.100:443"',
+            '"4"   = "149.154.167.91:443"',
+            '"5"   = "149.154.171.5:443"',
+            '"203" = "91.105.192.100:443"',
+        ]
     CONFIG_FILE.write_text("\n".join(lines) + "\n")
     CONFIG_FILE.chmod(0o640)
 
