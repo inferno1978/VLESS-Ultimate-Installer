@@ -121,11 +121,12 @@ if [[ -d "${INSTALL_DIR}/.git" ]]; then
     _update_module() {
         local rel_path="$1"
         local url="https://raw.githubusercontent.com/inferno1978/VLESS-Ultimate-Installer/${BRANCH}/${rel_path}"
-        curl -fsSL --connect-timeout 15 -o "${INSTALL_DIR}/${rel_path}" "$url" 2>/dev/null \
+        curl -fsSL --connect-timeout 15 -H "Cache-Control: no-cache" -H "Pragma: no-cache" -o "${INSTALL_DIR}/${rel_path}" "$url" 2>/dev/null \
             && info "Обновлён: ${rel_path}" \
             || warn "Не удалось обновить: ${rel_path}"
     }
     _update_module "vless_installer/modules/tg_nets.py"
+    _update_module "vless_installer/modules/user_fp_manager.py"
     _update_module "vless_installer/_core.py"
     _update_module "main.py"
 else
@@ -145,7 +146,7 @@ else
         _update_module() {
             local rel_path="$1"
             local url="https://raw.githubusercontent.com/inferno1978/VLESS-Ultimate-Installer/${BRANCH}/${rel_path}"
-            curl -fsSL --connect-timeout 15 -o "${INSTALL_DIR}/${rel_path}" "$url" 2>/dev/null \
+            curl -fsSL --connect-timeout 15 -H "Cache-Control: no-cache" -H "Pragma: no-cache" -o "${INSTALL_DIR}/${rel_path}" "$url" 2>/dev/null \
                 && info "Принудительно обновлён: ${rel_path}" \
                 || warn "Не удалось обновить: ${rel_path}"
         }
@@ -154,6 +155,7 @@ else
         _update_module "vless_installer/modules/tg_bot.py"
         _update_module "vless_installer/modules/port_hopping.py"
         _update_module "vless_installer/modules/tg_nets.py"
+        _update_module "vless_installer/modules/user_fp_manager.py"
     else
         info "Клонирование репозитория..."
         if ! git clone --quiet --depth 1 --branch "$BRANCH" "$REPO_URL" "$INSTALL_DIR" 2>/dev/null; then
