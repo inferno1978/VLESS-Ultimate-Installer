@@ -15146,7 +15146,7 @@ def _fp_get_current() -> str:
 
 
 def _fp_patch_config(new_fp: str) -> bool:
-    """Меняет fingerprint во всех outbound в config.json."""
+    """Меняет fingerprint во всех outbound в config.json и обновляет state.json."""
     for cfg_path in (Path("/usr/local/etc/xray/config.json"), CONFIG_DIR / "config.json"):
         if not cfg_path.exists():
             continue
@@ -15165,6 +15165,22 @@ def _fp_patch_config(new_fp: str) -> bool:
         except Exception as e:
             warn(f"Ошибка патча конфига {cfg_path}: {e}")
             return False
+
+    # Синхронизируем fingerprint в state.json
+    if STATE_FILE.exists():
+        try:
+            st = json.loads(STATE_FILE.read_text())
+            st["fingerprint"] = new_fp
+            if "chain_nodes" in st and isinstance(st["chain_nodes"], list):
+                for node in st["chain_nodes"]:
+                    if isinstance(node, dict) and "fp" in node:
+                        node["fp"] = new_fp
+            if "chain_exit_fp" in st:
+                st["chain_exit_fp"] = new_fp
+            STATE_FILE.write_text(json.dumps(st, indent=2, ensure_ascii=False))
+        except Exception as e:
+            warn(f"Не удалось обновить state.json: {e}")
+
     return True
 
 
