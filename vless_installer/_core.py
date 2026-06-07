@@ -68,6 +68,7 @@ from vless_installer.modules.ipset_persist   import (
     ipset_save, ipset_restore_unit_install, ipset_restore_unit_remove,
     do_manage_ipset_persist,
 )
+from vless_installer.modules.ipban import do_manage_ipban
 from vless_installer.modules.ripe_file_age   import (
     check_ripe_file_age, ripe_file_age_banner,
 )
@@ -29335,6 +29336,7 @@ def _menu_security() -> None:
         _box_item("W",  f"🔌 AWG Tunnel Watchdog  {DIM}(fallback при падении awg0){NC}")
         _box_item("N",  f"🌐 AWG Multi-Node  {DIM}(ноды, failover, SSH-защита){NC}")
         _box_item("IP", f"📦 ipset Persist  {DIM}(восстановление ipset при reboot){NC}")
+        _box_item("IB", f"🚫 IP-Бан  {DIM}(iptables/ipset: IP / подсеть / диапазон / ASN){NC}")
         _box_item("CL", f"🔗 Кластер Exit Nodes  {DIM}(все Exit Nodes по SSH){NC}")
         _box_item("9", f"🔒 Мониторинг certbot renew  {DIM}(алерт при истечении){NC}")
         _box_item("H", f"🔒 SSH Hardening  {DIM}(порт / ключи / AllowUsers){NC}")
@@ -29388,6 +29390,8 @@ def _menu_security() -> None:
             do_manage_awg_watchdog()
         elif ch.lower() == "ip":
             do_manage_ipset_persist()
+        elif ch.lower() == "ib":
+            do_manage_ipban()
         elif ch.lower() == "cl":
             do_cluster_menu()
         elif ch.lower() == "n":
