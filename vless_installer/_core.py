@@ -125,7 +125,7 @@ from vless_installer.modules.fragment_watchdog   import do_fragment_watchdog_men
 from vless_installer.modules.fragment_stats      import do_fragment_stats_menu
 from vless_installer.modules.fragment_share      import do_fragment_share_menu
 from vless_installer.modules.port_hopping        import do_port_hopping_menu, ph_status
-from vless_installer.modules.tg_bot              import do_tg_bot_menu
+from vless_installer.modules.tg_bot              import do_tg_bot_menu, do_manage_telegram
 # ── Hysteria2 transport (аддитивно, v4.12.7+) ────────────────────────────────
 from vless_installer.modules.hysteria2_menu      import do_hysteria2_menu
 # ── Новые модули (бэкап, cold boot, health monitor) ──────────────────────────
