@@ -1704,6 +1704,13 @@ def _menu_xray_integration() -> None:
         _box_item("3", "🔍  Проверить статус xray inbound + iptables")
         _box_item("N", "🌐  Обновить подсети Telegram + переприменить iptables")
         _box_sep()
+        from vless_installer.modules.telemt_self_route import status as _sr_status
+        _sr = _sr_status()
+        if _sr["return_rule"] and _sr["after_xray"]:
+            _box_item("R", f"🔁  Маршрут DC/ME трафика: {GREEN}ВКЛЮЧЁН{NC}  (after=xray + RETURN rule)")
+        else:
+            _box_item("R", f"🔁  Маршрут DC/ME трафика: {YELLOW}ВЫКЛЮЧЕН{NC}  (telemt стартует до iptables)")
+        _box_sep()
         _box_item("Q", "← Назад"); _box_bot(); print()
 
         try:
@@ -1726,6 +1733,24 @@ def _menu_xray_integration() -> None:
                 _ok(msg)
             else:
                 _err(msg)
+            _pause()
+
+        elif ch == "r":
+            from vless_installer.modules.telemt_self_route import enable as _sr_enable, disable as _sr_disable, status as _sr_status
+            _sr = _sr_status()
+            print()
+            if _sr["return_rule"] and _sr["after_xray"]:
+                _info("Маршрутизация DC/ME уже включена. Отключить?")
+                if _ask(f"{CYAN}Отключить? [y/N]: {NC}", c=True).strip().lower() == "y":
+                    ok, msg = _sr_disable()
+                    _ok(msg) if ok else _err(msg)
+            else:
+                _info("Включаю маршрутизацию DC/ME трафика Telemt через xray...")
+                ok, msg = _sr_enable()
+                if ok:
+                    _ok(msg)
+                else:
+                    _err(msg)
             _pause()
 
         elif ch == "3":
