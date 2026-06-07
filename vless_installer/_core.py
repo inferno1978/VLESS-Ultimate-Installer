@@ -15713,6 +15713,7 @@ def do_manage_users() -> None:
         _box_item("3", f"Показать ссылку / QR для пользователя")
         _box_item("4", f"Показать трафик пользователей (Stats API)")
         _box_item("5", f"Применить список к Xray (сохранить + перезапустить)")
+        _box_item("F", f"Сменить TLS Fingerprint")
         _box_item("Q", f"Назад")
         _box_bottom()
         ch = input(f"{CYAN}Выбор:{NC} ").strip().lower()
@@ -15857,6 +15858,10 @@ def do_manage_users() -> None:
             else:
                 warn("Применение не удалось — см. лог")
             input(f"{BLUE}Нажмите Enter...{NC}")
+
+        elif ch == "f":
+            from vless_installer.modules.user_fp_manager import do_change_fp_interactive
+            do_change_fp_interactive()
 
         elif ch in ("q", "Q", ""):
             break
@@ -16689,6 +16694,7 @@ def do_unified_user_manager() -> None:
             _box_item("7", f"Отключить / Восстановить пользователя")
             _box_item("8", f"Редактировать пользователя (имя / email)")
             _box_item("E", f"Экспорт всех пользователей (ZIP с QR-кодами)")
+            _box_item("F", f"Сменить TLS Fingerprint")
             _box_item("Q", f"Назад")
             _box_bottom()
             ch = input(f"{CYAN}Выбор:{NC} ").strip().lower()
@@ -16937,6 +16943,10 @@ def do_unified_user_manager() -> None:
                     continue
                 _do_export_users_zip(users, install_mode)
                 input(f"{BLUE}Нажмите Enter...{NC}")
+
+            elif ch == "f":
+                from vless_installer.modules.user_fp_manager import do_change_fp_interactive
+                do_change_fp_interactive()
 
             elif ch in ("q", ""):
                 break
