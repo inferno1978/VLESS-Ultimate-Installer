@@ -1,21 +1,31 @@
 """
 vless_installer/modules/fragment_fuzzer.py
 ───────────────────────────────────────────────────────────────────────────────
-Автоматический подбор оптимальных параметров фрагментации (Fuzzer).
+Автоматический подбор оптимальных параметров фрагментации.
 
-Алгоритм:
-  1. Для каждой комбинации length/interval/packets запускает тестовое
-     исходящее TLS-соединение через временный конфиг Xray (xray run -test
-     + реальный TLS handshake через socks5-прокси).
-  2. Измеряет время TLS Handshake и факт его успешного завершения.
-  3. Ранжирует результаты по (success_rate DESC, avg_ttfb ASC).
-  4. Выводит рекомендацию и сохраняет «победивший» конфиг.
+Два режима работы:
+─────────────────
+  Режим A — «С VPS» (ориентировочный):
+    Запускает временный Xray-процесс на VPS и делает TLS Handshake к внешнему
+    хосту через него. DPI между VPS и интернетом не проверяется — результат
+    показывает только базовую работоспособность конфига.
 
-ВАЖНО: серверный /etc/xray/config.json не затрагивается.
-Fuzzer использует временный порт (10900) и тестовое соединение.
+  Режим B — «С клиента» (точный, рекомендуется):
+    Генерирует все конфиги из матрицы в fragment_configs/fuzz_NN_label.json.
+    Опционально поднимает временный HTTP-коллектор на порту 10901.
+    Клиент запускает каждый конфиг, затем отправляет результат:
+        curl "http://VPS:10901/report?id=01&ttfb=420&ok=1"
+    Сервер собирает ответы, строит таблицу, сохраняет победителя.
 
-Точка входа из _core.py:
-    from vless_installer.modules.fragment_fuzzer import do_fragment_fuzzer_menu
+ВАЖНО:
+  • /etc/xray/config.json не затрагивается ни в каком режиме.
+  • Временный Xray-процесс (режим A) завершается сразу после теста.
+  • HTTP-коллектор принимает только GET /report?... — никаких команд не выполняет.
+  • FP берётся из state.json, а не захардкожен как chrome.
+  • Принцип «одна функция — один файл» соблюдён.
+
+Публичное API:
+    do_fragment_fuzzer_menu()   → точка входа из _core.py (Меню 4 → F2)
 ───────────────────────────────────────────────────────────────────────────────
 """
 from __future__ import annotations
@@ -27,7 +37,11 @@ import socket
 import subprocess
 import sys
 import tempfile
+import threading
 import time
+import urllib.parse
+from datetime import datetime
+from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 from typing import Optional
 
@@ -41,12 +55,11 @@ def _detect_colors() -> dict:
                 CYAN='\033[0;34m', BLUE='\033[0;35m', BOLD='\033[1m',
                 DIM='\033[2m', WHITE='\033[0;30m', NC='\033[0m',
             )
-        else:
-            return dict(
-                RED='\033[0;31m', GREEN='\033[0;32m', YELLOW='\033[1;33m',
-                CYAN='\033[0;36m', BLUE='\033[0;34m', BOLD='\033[1m',
-                DIM='\033[2m', WHITE='\033[1;37m', NC='\033[0m',
-            )
+        return dict(
+            RED='\033[0;31m', GREEN='\033[0;32m', YELLOW='\033[1;33m',
+            CYAN='\033[0;36m', BLUE='\033[0;34m', BOLD='\033[1m',
+            DIM='\033[2m', WHITE='\033[1;37m', NC='\033[0m',
+        )
     return {k: '' for k in ('RED','GREEN','YELLOW','CYAN','BLUE','BOLD','DIM','WHITE','NC')}
 
 _C = _detect_colors()
@@ -55,14 +68,13 @@ CYAN   = _C['CYAN'];  BLUE   = _C['BLUE'];   BOLD   = _C['BOLD']
 DIM    = _C['DIM'];   WHITE  = _C['WHITE'];  NC     = _C['NC']
 
 # ── Логирование ────────────────────────────────────────────────────────────
-_LOG_FILE  = Path("/var/log/vless-install.log")
-_FUZZ_LOG  = Path("/var/log/xray-fragment-fuzzer.log")
+_LOG_FILE   = Path("/var/log/vless-install.log")
+_FUZZ_LOG   = Path("/var/log/xray-fragment-fuzzer.log")
 _STATE_FILE = Path("/var/lib/xray-installer/state.json")
 
 def _log(level: str, msg: str) -> None:
     try:
         import re as _re
-        from datetime import datetime
         for lf in (_LOG_FILE, _FUZZ_LOG):
             lf.parent.mkdir(parents=True, exist_ok=True)
             with lf.open("a") as f:
@@ -79,7 +91,7 @@ def _warn(msg: str)    -> None: print(f"{YELLOW}[WARN]{NC}  {msg}");  _log("WARN
 # ── Импорт ────────────────────────────────────────────────────────────────
 from vless_installer.modules.box_renderer import (
     _box_top, _box_sep, _box_bottom, _box_row, _box_item, _box_back,
-    _box_info, _box_warn, _box_desc, _get_box_width,
+    _box_info, _box_warn, _box_desc, _box_ok, _get_box_width,
 )
 from vless_installer.modules.fragment_config import (
     build_fragment_sockopt,
@@ -88,55 +100,48 @@ from vless_installer.modules.fragment_config import (
 
 # ── Константы ─────────────────────────────────────────────────────────────
 _XRAY_BIN             = Path("/usr/local/bin/xray")
-_FUZZ_SOCKS_PORT_PREF = 10900   # предпочтительный порт (ищем свободный начиная отсюда)
-_FUZZ_TIMEOUT_SEC     = 8       # таймаут одного TLS-теста
-_FUZZ_REPEATS         = 3       # повторений на комбинацию для усреднения
+_FRAGMENT_DIR         = Path("/var/lib/xray-installer/fragment_configs")
+_FUZZ_SOCKS_PORT_PREF = 10900
+_COLLECTOR_PORT       = 10901
+_FUZZ_TIMEOUT_SEC     = 8
+_FUZZ_REPEATS         = 5       # увеличено с 3 — для статистической надёжности
+_COLLECTOR_TIMEOUT    = 300     # 5 минут максимум
 _TEST_HOST            = "www.google.com"
 _TEST_PORT            = 443
 
-# ── Матрица параметров для перебора ──────────────────────────────────────
-# Три диапазона length:
-#   1-5    — агрессивные: жёсткий DPI (Иран, ТСПУ)
-#   10-50  — средние: работают там, где мелкие уже фильтруются как сигнатура
-#   50-200 — лёгкие: минимальный оверхед, поверхностный DPI
-#
-# ВНИМАНИЕ: Fuzzer тестирует с VPS, поэтому его результаты носят
-# ориентировочный характер. Итоговый выбор — за пользователем на своём устройстве.
-# Используйте F4 (генерация всех пресетов) для реального тестирования.
-_FUZZ_MATRIX = [
-    # (packets, length, interval_ms)
-    # ── Агрессивные (мелкие пакеты) ──────────────────────────────────
-    ("1-3", "1-1",   "5-10"),
-    ("1-3", "1-3",   "5-10"),
-    ("1-3", "1-5",   "10-20"),
-    # ── Средние (10–50 байт) ─────────────────────────────────────────
-    ("1-3", "10-20", "10-20"),
-    ("1-3", "20-50", "20-40"),
-    ("1-2", "20-50", "30-60"),
-    # ── Лёгкие (50–200 байт) ─────────────────────────────────────────
-    ("1-2", "50-100",  "10-20"),
-    ("1-1", "100-200", "5-10"),
+# ── Матрица параметров ────────────────────────────────────────────────────
+# (packets, length, interval_ms, label)
+# Три группы: агрессивные / средние / лёгкие.
+_FUZZ_MATRIX: list[tuple[str, str, str, str]] = [
+    ("1-3", "1-1",   "5-10",  "ultra"),
+    ("1-3", "1-3",   "5-10",  "aggressive-a"),
+    ("1-3", "1-5",   "10-20", "aggressive-b"),
+    ("1-3", "10-20", "10-20", "medium-a"),
+    ("1-3", "20-50", "20-40", "medium-b"),
+    ("1-2", "20-50", "30-60", "medium-c"),
+    ("1-2", "50-100",  "10-20", "light-a"),
+    ("1-1", "100-200", "5-10",  "light-b"),
 ]
 
-# ── Вспомогательные ───────────────────────────────────────────────────────
+
+# =============================================================================
+#  ОБЩИЕ УТИЛИТЫ
+# =============================================================================
 
 def _port_free(port: int) -> bool:
-    """Проверяет, что порт свободен."""
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
         s.settimeout(1)
         return s.connect_ex(("127.0.0.1", port)) != 0
 
 
-def _find_free_port(start: int = _FUZZ_SOCKS_PORT_PREF, attempts: int = 20) -> Optional[int]:
-    """Ищет свободный порт начиная с `start`. Возвращает номер или None."""
+def _find_free_port(start: int, attempts: int = 20) -> Optional[int]:
     for port in range(start, start + attempts):
         if _port_free(port):
             return port
     return None
 
 
-def _wait_port_open(port: int, timeout: float = 5.0) -> bool:
-    """Ждёт, пока порт откроется (сервис поднялся)."""
+def _wait_port_open(port: int, timeout: float = 6.0) -> bool:
     deadline = time.time() + timeout
     while time.time() < deadline:
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
@@ -147,6 +152,57 @@ def _wait_port_open(port: int, timeout: float = 5.0) -> bool:
     return False
 
 
+def _load_state() -> Optional[dict]:
+    if not _STATE_FILE.exists():
+        _warn("state.json не найден — сначала установите VLESS-сервер")
+        return None
+    try:
+        data = json.loads(_STATE_FILE.read_text())
+    except Exception as e:
+        _warn(f"Не удалось прочитать state.json: {e}")
+        return None
+    if not data.get("domain") or not data.get("uuid"):
+        _warn("В state.json нет domain/uuid — сначала завершите установку сервера")
+        return None
+    return data
+
+
+def _get_server_ip(state: dict) -> str:
+    ip = state.get("server_ip", "")
+    if ip:
+        return ip
+    try:
+        return socket.gethostbyname(state.get("domain", ""))
+    except Exception:
+        return state.get("domain", "?")
+
+
+def _fp_from_state(state: dict) -> str:
+    """Берёт fingerprint из state.json. Fallback → chrome."""
+    return (
+        state.get("fingerprint")
+        or state.get("tls_fingerprint")
+        or "chrome"
+    )
+
+
+def _patch_fp_in_config(path: Path, fp: str) -> None:
+    """Патчит fingerprint в сгенерированном конфиге."""
+    try:
+        cfg = json.loads(path.read_text())
+        for ob in cfg.get("outbounds", []):
+            rs = ob.get("streamSettings", {}).get("realitySettings", {})
+            if rs:
+                rs["fingerprint"] = fp
+        path.write_text(json.dumps(cfg, ensure_ascii=False, indent=2))
+    except Exception:
+        pass
+
+
+# =============================================================================
+#  РЕЖИМ A — ТЕСТ С VPS
+# =============================================================================
+
 def _build_test_client_config(
     state: dict,
     packets: str,
@@ -155,8 +211,9 @@ def _build_test_client_config(
     socks_port: int,
 ) -> dict:
     """
-    Строит минимальный клиентский конфиг с фрагментацией для одного теста.
-    Socks5 на socks_port, outbound → VPS с fragment sockopt.
+    Строит минимальный клиентский конфиг Xray для теста с VPS.
+    FP берётся из state.json — не захардкожен.
+    Не затрагивает /etc/xray/config.json.
     """
     protocol_mode = state.get("protocol_mode", "reality")
     server_host   = state.get("domain", "")
@@ -166,427 +223,630 @@ def _build_test_client_config(
     short_id      = state.get("short_id", "")
     reality_dest  = state.get("reality_dest", "www.microsoft.com")
     xtls_flow     = state.get("xtls_flow", "xtls-rprx-vision")
-
-    sockopt = build_fragment_sockopt(packets, length, interval)
+    fp            = _fp_from_state(state)
+    sockopt       = build_fragment_sockopt(packets, length, interval)
 
     if protocol_mode == "xhttp":
-        xhttp_path = state.get("xhttp_path", "/")
-        xhttp_mode = state.get("xhttp_mode", "streamup")
         outbound = {
-            "tag":      "proxy",
-            "protocol": "vless",
-            "settings": {
-                "vnext": [{
-                    "address": server_host,
-                    "port":    server_port,
-                    "users":   [{"id": uuid_val, "encryption": "none"}],
-                }],
-            },
+            "tag": "proxy", "protocol": "vless",
+            "settings": {"vnext": [{"address": server_host, "port": server_port,
+                "users": [{"id": uuid_val, "encryption": "none"}]}]},
             "streamSettings": {
-                "network":  "xhttp",
-                "security": "tls",
-                "sockopt":  sockopt,
-                "tlsSettings": {
-                    "serverName":    server_host,
-                    "allowInsecure": False,
-                },
+                "network": "xhttp", "security": "tls", "sockopt": sockopt,
+                "tlsSettings": {"serverName": server_host, "allowInsecure": False},
                 "xhttpSettings": {
-                    "path": xhttp_path,
-                    "mode": xhttp_mode,
+                    "path": state.get("xhttp_path", "/"),
+                    "mode": state.get("xhttp_mode", "streamup"),
                 },
             },
         }
     else:
         sni = reality_dest.split(":")[0] if ":" in reality_dest else reality_dest
         outbound = {
-            "tag":      "proxy",
-            "protocol": "vless",
-            "settings": {
-                "vnext": [{
-                    "address": server_host,
-                    "port":    server_port,
-                    "users":   [{
-                        "id":         uuid_val,
-                        "encryption": "none",
-                        **({"flow": xtls_flow} if xtls_flow else {}),
-                    }],
-                }],
-            },
+            "tag": "proxy", "protocol": "vless",
+            "settings": {"vnext": [{"address": server_host, "port": server_port,
+                "users": [{"id": uuid_val, "encryption": "none",
+                           **( {"flow": xtls_flow} if xtls_flow else {} )}]}]},
             "streamSettings": {
-                "network":  "tcp",
-                "security": "reality",
-                "sockopt":  sockopt,
+                "network": "tcp", "security": "reality", "sockopt": sockopt,
                 "realitySettings": {
-                    "show":        False,
-                    "fingerprint": "chrome",
-                    "serverName":  sni,
-                    "publicKey":   pub_key,
-                    "shortId":     short_id,
-                    "spiderX":     "/",
+                    "show": False, "fingerprint": fp,
+                    "serverName": sni, "publicKey": pub_key,
+                    "shortId": short_id, "spiderX": "/",
                 },
             },
         }
 
     return {
         "log": {"loglevel": "none"},
-        "inbounds": [{
-            "tag":      "socks-test",
-            "protocol": "socks",
-            "listen":   "127.0.0.1",
-            "port":     socks_port,
-            "settings": {"auth": "noauth", "udp": False},
-        }],
-        "outbounds": [
-            outbound,
-            {"protocol": "freedom", "tag": "direct"},
-        ],
+        "inbounds": [{"tag": "socks-test", "protocol": "socks",
+                      "listen": "127.0.0.1", "port": socks_port,
+                      "settings": {"auth": "noauth", "udp": False}}],
+        "outbounds": [outbound, {"protocol": "freedom", "tag": "direct"}],
     }
 
 
 def _tls_handshake_via_socks5(
-    socks_host: str,
     socks_port: int,
-    target_host: str,
-    target_port: int,
-    timeout: float = _FUZZ_TIMEOUT_SEC,
+    target_host: str = _TEST_HOST,
+    target_port: int = _TEST_PORT,
+    timeout: float   = _FUZZ_TIMEOUT_SEC,
 ) -> Optional[float]:
     """
-    Устанавливает CONNECT через socks5 и измеряет время TLS Handshake.
-    Возвращает время (сек) или None при неудаче.
-
-    Использует только stdlib (socket + ssl) — без внешних зависимостей.
+    TLS Handshake через socks5 на 127.0.0.1:socks_port.
+    Возвращает время handshake (сек) или None при неудаче.
+    Только stdlib — без внешних зависимостей.
     """
-    import ssl
-    import struct
-
+    import ssl, struct
     try:
-        s = socket.create_connection((socks_host, socks_port), timeout=timeout)
+        s = socket.create_connection(("127.0.0.1", socks_port), timeout=timeout)
         s.settimeout(timeout)
-
-        # SOCKS5 greeting: VER=5, NMETHODS=1, METHOD=0 (no auth)
         s.sendall(b"\x05\x01\x00")
         resp = s.recv(2)
         if len(resp) < 2 or resp[0] != 5 or resp[1] != 0:
-            s.close()
-            return None
-
-        # SOCKS5 CONNECT request
-        host_bytes = target_host.encode("idna")
-        req = (
-            b"\x05\x01\x00\x03"
-            + bytes([len(host_bytes)])
-            + host_bytes
-            + struct.pack("!H", target_port)
-        )
-        s.sendall(req)
+            s.close(); return None
+        host_b = target_host.encode("idna")
+        s.sendall(b"\x05\x01\x00\x03" + bytes([len(host_b)]) + host_b
+                  + struct.pack("!H", target_port))
         reply = s.recv(10)
         if len(reply) < 2 or reply[1] != 0:
-            s.close()
-            return None
-
-        # TLS Handshake timing
+            s.close(); return None
         ctx = ssl.create_default_context()
-        t0 = time.perf_counter()
-        tls = ctx.wrap_socket(s, server_hostname=target_host, do_handshake_on_connect=True)
+        t0  = time.perf_counter()
+        tls = ctx.wrap_socket(s, server_hostname=target_host,
+                              do_handshake_on_connect=True)
         elapsed = time.perf_counter() - t0
         tls.close()
         return elapsed
-
     except Exception:
         return None
 
 
 def _run_one_probe(
     state: dict,
-    packets: str,
-    length: str,
-    interval: str,
+    packets: str, length: str, interval: str,
     socks_port: int,
     tmp_dir: str,
     idx: int,
 ) -> list[Optional[float]]:
     """
-    Запускает временный xray-процесс с тестовым конфигом и делает
-    _FUZZ_REPEATS попыток TLS Handshake. Возвращает список измерений.
-    Временный xray-процесс завершается после теста.
+    Запускает временный xray-процесс и делает _FUZZ_REPEATS попыток handshake.
+    Процесс завершается сразу после теста.
     """
     if not _XRAY_BIN.exists():
-        _warn("Xray не найден — пропуск теста")
         return [None] * _FUZZ_REPEATS
-
     if not _port_free(socks_port):
-        _warn(f"Порт {socks_port} занят — пропуск")
         return [None] * _FUZZ_REPEATS
 
-    cfg = _build_test_client_config(state, packets, length, interval, socks_port)
+    cfg      = _build_test_client_config(state, packets, length, interval, socks_port)
     cfg_path = Path(tmp_dir) / f"fuzz_{idx}.json"
     cfg_path.write_text(json.dumps(cfg))
 
-    # Проверяем конфиг синтаксически
-    r_test = subprocess.run(
+    r = subprocess.run(
         [str(_XRAY_BIN), "run", "-test", "-config", str(cfg_path)],
         capture_output=True, text=True, timeout=10,
     )
-    if r_test.returncode != 0:
-        _log("WARN", f"xray -test failed: {r_test.stderr.strip()[:200]}")
+    if r.returncode != 0:
+        _log("WARN", f"xray -test failed idx={idx}: {r.stderr.strip()[:200]}")
         return [None] * _FUZZ_REPEATS
 
-    # Запускаем xray как фоновый процесс
     proc = subprocess.Popen(
         [str(_XRAY_BIN), "run", "-config", str(cfg_path)],
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
         preexec_fn=os.setsid,
     )
     try:
         if not _wait_port_open(socks_port, timeout=6.0):
-            _log("WARN", f"Socks5:{socks_port} не открылся за 6 сек")
             return [None] * _FUZZ_REPEATS
-
         results: list[Optional[float]] = []
         for _ in range(_FUZZ_REPEATS):
-            t = _tls_handshake_via_socks5(
-                "127.0.0.1", socks_port,
-                _TEST_HOST, _TEST_PORT,
-                timeout=_FUZZ_TIMEOUT_SEC,
-            )
-            results.append(t)
+            results.append(_tls_handshake_via_socks5(socks_port))
             time.sleep(0.5)
         return results
-
     finally:
         try:
             os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
         except Exception:
-            try:
-                proc.terminate()
-            except Exception:
-                pass
+            try: proc.terminate()
+            except Exception: pass
         proc.wait(timeout=3)
 
 
-# ── Основная функция Fuzzer ───────────────────────────────────────────────
-
 def run_fragment_fuzzer(state: dict, socks_port: int = _FUZZ_SOCKS_PORT_PREF) -> Optional[dict]:
     """
-    Перебирает матрицу фрагментации, измеряет TLS Handshake через каждый
-    вариант и возвращает dict с лучшими параметрами:
-        {
-            "packets": "1-3",
-            "length":  "3-7",
-            "interval": "10-20",
-            "avg_ttfb": 0.42,
-            "success_rate": 1.0,
-        }
-    или None, если ни один вариант не сработал.
+    Режим A: перебирает матрицу, измеряет TLS Handshake, возвращает лучший вариант.
+    Результат ориентировочный — DPI на пути VPS→интернет отсутствует.
     """
     results = []
+    fp      = _fp_from_state(state)
+    total   = len(_FUZZ_MATRIX)
+    print()
+    _info(f"Fingerprint: {BOLD}{fp}{NC}")
+    _info(f"Перебор {total} комбинаций × {_FUZZ_REPEATS} попыток")
+    _info(f"Тест: TLS Handshake → {_TEST_HOST}:{_TEST_PORT} через временный socks5")
+    _warn("Результат ориентировочный — DPI на пути VPS→интернет не проверяется")
+    print()
 
     with tempfile.TemporaryDirectory(prefix="vless_fuzz_") as tmp_dir:
-        total = len(_FUZZ_MATRIX)
-        print()
-        _info(f"Начинаю перебор {total} комбинаций × {_FUZZ_REPEATS} попыток каждая")
-        _info(f"Тест: TLS Handshake → {_TEST_HOST}:{_TEST_PORT} через временный socks5")
-        print()
+        for idx, (packets, length, interval, label) in enumerate(_FUZZ_MATRIX, 1):
+            desc = f"packets={packets} length={length} interval={interval}мс"
+            print(f"  {DIM}[{idx:02d}/{total}]{NC}  {desc:<45}", end="", flush=True)
 
-        for idx, (packets, length, interval) in enumerate(_FUZZ_MATRIX, 1):
-            label = f"packets={packets} length={length} interval={interval}мс"
-            print(f"  {DIM}[{idx}/{total}]{NC}  {label} ...", end="", flush=True)
+            meas     = _run_one_probe(state, packets, length, interval,
+                                      socks_port, tmp_dir, idx)
+            ok       = [m for m in meas if m is not None]
+            rate     = len(ok) / len(meas) if meas else 0.0
+            avg_ttfb = sum(ok) / len(ok) if ok else float("inf")
 
-            measurements = _run_one_probe(
-                state, packets, length, interval,
-                socks_port=socks_port,
-                tmp_dir=tmp_dir,
-                idx=idx,
-            )
-
-            successes = [m for m in measurements if m is not None]
-            success_rate = len(successes) / len(measurements) if measurements else 0.0
-            avg_ttfb     = sum(successes) / len(successes) if successes else float("inf")
-
-            if success_rate > 0:
-                print(f"  {GREEN}✓{NC} {success_rate*100:.0f}% успех, "
-                      f"avg TTFB={avg_ttfb*1000:.0f} мс")
+            if rate > 0:
+                print(f"  {GREEN}✓{NC}  {int(rate*100):3d}%  "
+                      f"{DIM}ttfb={int(avg_ttfb*1000)}мс{NC}")
             else:
-                print(f"  {RED}✗{NC} все попытки провалились")
+                print(f"  {RED}✗{NC}  все попытки провалились")
 
             results.append({
-                "packets":      packets,
-                "length":       length,
-                "interval":     interval,
-                "avg_ttfb":     avg_ttfb,
-                "success_rate": success_rate,
+                "packets": packets, "length": length, "interval": interval,
+                "label": label, "avg_ttfb": avg_ttfb, "success_rate": rate,
             })
-            _log("INFO", f"{label} → success={success_rate:.2f} ttfb={avg_ttfb*1000:.0f}ms")
-
-            # Небольшая пауза между итерациями
+            _log("INFO", f"{desc} → ok={rate:.2f} ttfb={int(avg_ttfb*1000)}мс")
             time.sleep(1.0)
 
-    # Сортируем: сначала по success_rate DESC, затем по avg_ttfb ASC
-    ranked = sorted(
-        results,
-        key=lambda r: (-r["success_rate"], r["avg_ttfb"]),
-    )
+    ranked = sorted(results, key=lambda r: (-r["success_rate"], r["avg_ttfb"]))
     if not ranked or ranked[0]["success_rate"] == 0.0:
         return None
     return ranked[0]
 
 
-# ── Интерактивное меню ────────────────────────────────────────────────────
+# =============================================================================
+#  РЕЖИМ B — ТЕСТ С КЛИЕНТА
+# =============================================================================
 
-def do_fragment_fuzzer_menu() -> None:
+_collector_results: dict[str, dict] = {}
+_collector_lock    = threading.Lock()
+_collector_done    = threading.Event()
+
+
+class _CollectorHandler(BaseHTTPRequestHandler):
     """
-    Интерактивное меню автоматического подбора фрагментации.
-    Вызывается из _menu_diagnostics() в _core.py.
+    HTTP-коллектор результатов от клиентов.
+    Принимает только GET /report?id=XX&ttfb=NNN&ok=0|1
+    Не выполняет никаких команд — только читает query string.
     """
+
+    def do_GET(self) -> None:  # noqa: N802
+        try:
+            parsed = urllib.parse.urlparse(self.path)
+            if parsed.path != "/report":
+                self._respond(404, "not found"); return
+            params   = dict(urllib.parse.parse_qsl(parsed.query))
+            rid      = params.get("id", "").strip()[:8]
+            ok_str   = params.get("ok",   "0").strip()
+            ttfb_str = params.get("ttfb", "").strip()
+
+            if not rid or not rid.replace("-", "").isalnum():
+                self._respond(400, "bad id"); return
+
+            ok   = ok_str == "1"
+            ttfb = int(ttfb_str) if ttfb_str.isdigit() else None
+
+            with _collector_lock:
+                _collector_results[rid] = {
+                    "ok": ok, "ttfb_ms": ttfb,
+                    "ts": datetime.now().isoformat(timespec="seconds"),
+                }
+                received = len(_collector_results)
+
+            self._respond(200, "ok")
+            _log("INFO", f"collector got id={rid} ok={ok} ttfb={ttfb}")
+
+            if received >= len(_FUZZ_MATRIX):
+                _collector_done.set()
+
+        except Exception:
+            self._respond(500, "error")
+
+    def _respond(self, code: int, body: str) -> None:
+        data = body.encode()
+        self.send_response(code)
+        self.send_header("Content-Type", "text/plain")
+        self.send_header("Content-Length", str(len(data)))
+        self.end_headers()
+        self.wfile.write(data)
+
+    def log_message(self, fmt: str, *args) -> None:
+        _log("INFO", f"collector: {fmt % args}")
+
+
+def _collector_serve_loop(server: HTTPServer) -> None:
+    while not _collector_done.is_set():
+        try:
+            server.handle_request()
+        except Exception:
+            break
+
+
+def _generate_all_client_configs(state: dict) -> list[dict]:
+    """
+    Генерирует конфиги для всех комбинаций матрицы.
+    Использует generate_fragment_client_config() — не дублирует логику.
+    Патчит FP из state.json.
+    """
+    fp    = _fp_from_state(state)
+    total = len(_FUZZ_MATRIX)
+    _FRAGMENT_DIR.mkdir(parents=True, exist_ok=True)
+    generated = []
+
+    for idx, (packets, length, interval, label) in enumerate(_FUZZ_MATRIX, 1):
+        file_label = f"fuzz_{idx:02d}_{label}"
+        path = generate_fragment_client_config(
+            packets=packets, length=length, interval=interval, label=file_label,
+        )
+        if path:
+            _patch_fp_in_config(path, fp)
+            generated.append({
+                "id": f"{idx:02d}", "label": label,
+                "packets": packets, "length": length, "interval": interval,
+                "path": path,
+            })
+            print(f"  {DIM}[{idx:02d}/{total}]{NC}  {file_label}.json  "
+                  f"{DIM}packets={packets} length={length} interval={interval}мс{NC}")
+        else:
+            _warn(f"Не удалось сгенерировать конфиг #{idx:02d} ({label})")
+
+    return generated
+
+
+def _print_client_instructions(server_ip: str, generated: list[dict]) -> None:
+    """Инструкция для пользователя в стиле проекта."""
+    _box_sep()
+    _box_row(f"  {BOLD}Инструкция:{NC}")
+    _box_row()
+    _box_row(f"  1. Скачайте конфиги с сервера:")
+    _box_row(f"     {DIM}scp root@{server_ip}:{_FRAGMENT_DIR}/fuzz_*.json ./{NC}")
+    _box_row()
+    _box_row(f"  2. Для каждого конфига:")
+    _box_row(f"     {DIM}xray run -config fuzz_01_ultra.json{NC}")
+    _box_row()
+    _box_row(f"  3. В другом терминале отправьте результат на сервер:")
+    if generated:
+        ex = generated[0]
+        _box_row(
+            f"     {CYAN}curl{NC} {DIM}\"http://{server_ip}:{_COLLECTOR_PORT}"
+            f"/report?id={ex['id']}&ttfb=<мс>&ok=<0|1>\"{NC}"
+        )
+    _box_row()
+    _box_row(f"  {DIM}ok=1 — подключение прошло, ok=0 — не прошло{NC}")
+    _box_row(f"  {DIM}ttfb — время подключения в миллисекундах{NC}")
+    _box_row()
+    _box_row(f"  {YELLOW}Коллектор ждёт результатов {_COLLECTOR_TIMEOUT//60} мин "
+             f"или нажатия Enter на сервере.{NC}")
+
+
+def _print_collector_table(generated: list[dict]) -> Optional[dict]:
+    """Выводит таблицу результатов, возвращает победителя или None."""
+    with _collector_lock:
+        results = dict(_collector_results)
+
+    if not results:
+        _warn("Результатов от клиента не получено")
+        return None
+
+    _box_sep()
+    _box_row(f"  {BOLD}Результаты:{NC}")
+    _box_row()
+    _box_row(f"  {DIM}  #   label           packets   length    interval    ttfb мс  ok{NC}")
+    _box_row(f"  {DIM}{'─'*65}{NC}")
+
+    ranked = []
+    for item in generated:
+        rid = item["id"]
+        r   = results.get(rid)
+        if r:
+            ok_mark  = f"{GREEN}✓{NC}" if r["ok"] else f"{RED}✗{NC}"
+            ttfb_str = str(r["ttfb_ms"]) if r["ttfb_ms"] is not None else "—"
+            _box_row(
+                f"  {rid:>3}   {item['label']:<14}  {item['packets']:<8}  "
+                f"{item['length']:<8}  {item['interval']:<10}  "
+                f"{ttfb_str:>7}  {ok_mark}"
+            )
+            if r["ok"]:
+                ranked.append({**item,
+                    "ttfb_ms": r["ttfb_ms"] if r["ttfb_ms"] is not None else 9999})
+        else:
+            _box_row(
+                f"  {rid:>3}   {item['label']:<14}  {item['packets']:<8}  "
+                f"{item['length']:<8}  {item['interval']:<10}  "
+                f"{'—':>7}  {DIM}нет данных{NC}"
+            )
+
+    _box_row()
+    if not ranked:
+        return None
+
+    ranked.sort(key=lambda r: r["ttfb_ms"])
+    w = ranked[0]
+    _box_row(
+        f"  {GREEN}{BOLD}Победитель: #{w['id']} {w['label']} — "
+        f"packets={w['packets']} length={w['length']} "
+        f"interval={w['interval']}мс  ttfb={w['ttfb_ms']}мс{NC}"
+    )
+    return w
+
+
+def run_client_fuzzer(state: dict) -> None:
+    """Режим B: генерация конфигов + опциональный HTTP-коллектор."""
+    global _collector_results, _collector_done
+
+    server_ip = _get_server_ip(state)
+
     os.system("clear")
     print()
-    _box_top("🔬  ТЕСТ СВЯЗНОСТИ С VPS (FUZZER)")
+    _box_top(f"  {CYAN}FUZZER — РЕЖИМ B: ТЕСТ С КЛИЕНТА{NC}")
     _box_desc(
-        "Перебирает комбинации length/interval/packets и измеряет TLS Handshake. "
-        "Тест идёт с VPS — результат ориентировочный. "
-        "Для точного подбора используйте F4 и тестируйте "
-        "конфиги на своём устройстве."
+        "Генерируются конфиги для всех комбинаций матрицы. "
+        "Клиент тестирует их со своего устройства — "
+        "это единственный точный способ проверить обход DPI."
     )
     _box_sep()
-    _box_info(f"Целевой хост: {_TEST_HOST}:{_TEST_PORT}")
-    _box_info(f"Комбинаций в матрице: {len(_FUZZ_MATRIX)}  (агрессивные / средние / лёгкие)")
-    _box_info(f"Повторений на вариант: {_FUZZ_REPEATS}")
-    _box_info(f"Временный socks5-порт: авто (предпочтительно ~{_FUZZ_SOCKS_PORT_PREF})")
-    _box_info(f"Ожидаемое время: ~{len(_FUZZ_MATRIX) * _FUZZ_REPEATS * (_FUZZ_TIMEOUT_SEC + 2) // 60 + 1} мин")
+    _box_row(f"  {BOLD}Генерация конфигов...{NC}")
+    _box_row()
+
+    generated = _generate_all_client_configs(state)
+    if not generated:
+        _box_warn("Не удалось сгенерировать ни одного конфига")
+        _box_bottom()
+        input(f"\n{BLUE}Нажмите Enter...{NC}")
+        return
+
+    _box_row()
+    _box_ok(f"Сгенерировано: {len(generated)} конфигов  →  {_FRAGMENT_DIR}")
     _box_sep()
-    _box_warn("Не затрагивает серверный /etc/xray/config.json")
+    _box_info(f"Запустить HTTP-коллектор на порту {_COLLECTOR_PORT}?")
+    _box_row(f"  {DIM}Клиент отправляет результаты через curl — сервер строит таблицу.{NC}")
+    _box_row(f"  {DIM}Если нет — конфиги уже сохранены, тестируйте вручную.{NC}")
     _box_bottom()
     print()
 
-    # Проверяем наличие state.json
-    if not _STATE_FILE.exists():
-        _warn("state.json не найден — сначала установите VLESS-сервер")
-        input(f"\n{BLUE}Нажмите Enter...{NC}")
-        return
-
     try:
-        state = json.loads(_STATE_FILE.read_text())
-    except Exception as e:
-        _warn(f"Не удалось прочитать state.json: {e}")
-        input(f"\n{BLUE}Нажмите Enter...{NC}")
+        ans = input(f"  {CYAN}Запустить коллектор? [Y/n]:{NC} ").strip().lower()
+    except KeyboardInterrupt:
         return
 
-    if not state.get("domain") or not state.get("uuid"):
-        _warn("В state.json нет domain/uuid — сначала завершите установку сервера")
-        input(f"\n{BLUE}Нажмите Enter...{NC}")
+    if ans in ("n", "no", "н", "нет"):
+        os.system("clear")
+        print()
+        _box_top(f"  {CYAN}ИНСТРУКЦИЯ ДЛЯ РУЧНОГО ТЕСТИРОВАНИЯ{NC}")
+        _print_client_instructions(server_ip, generated)
+        _box_bottom()
+        print()
+        input(f"{BLUE}Нажмите Enter...{NC}")
         return
+
+    if not _port_free(_COLLECTOR_PORT):
+        _warn(f"Порт {_COLLECTOR_PORT} занят — коллектор не запущен")
+        _print_client_instructions(server_ip, generated)
+        print()
+        input(f"{BLUE}Нажмите Enter...{NC}")
+        return
+
+    # Сброс состояния и запуск коллектора
+    with _collector_lock:
+        _collector_results.clear()
+    _collector_done.clear()
+
+    server         = HTTPServer(("0.0.0.0", _COLLECTOR_PORT), _CollectorHandler)
+    server.timeout = 1.0
+    server_thread  = threading.Thread(target=_collector_serve_loop,
+                                      args=(server,), daemon=True)
+    server_thread.start()
+
+    os.system("clear")
+    print()
+    _box_top(f"  {CYAN}КОЛЛЕКТОР ЗАПУЩЕН  :{_COLLECTOR_PORT}{NC}")
+    _print_client_instructions(server_ip, generated)
+    _box_bottom()
+    print()
+    _info(f"Ожидание результатов ({_COLLECTOR_TIMEOUT//60} мин). "
+          f"Нажмите Enter для досрочного завершения.")
+
+    stop_event = threading.Event()
+
+    def _wait_enter() -> None:
+        try: input()
+        except Exception: pass
+        stop_event.set(); _collector_done.set()
+
+    threading.Thread(target=_wait_enter, daemon=True).start()
+
+    deadline = time.time() + _COLLECTOR_TIMEOUT
+    while time.time() < deadline:
+        if _collector_done.is_set() or stop_event.is_set():
+            break
+        with _collector_lock:
+            received = len(_collector_results)
+        print(f"\r  {DIM}Получено: {received}/{len(_FUZZ_MATRIX)}{NC}   ",
+              end="", flush=True)
+        time.sleep(1.0)
+    print()
+
+    server.shutdown()
+    server_thread.join(timeout=3)
+
+    print()
+    _box_top(f"  {CYAN}РЕЗУЛЬТАТЫ — РЕЖИМ B{NC}")
+    winner = _print_collector_table(generated)
+    _box_bottom()
+    print()
+
+    if winner:
+        try:
+            save = input(
+                f"  {CYAN}Сохранить победителя как fragment_recommended.json? [Y/n]:{NC} "
+            ).strip().lower()
+        except KeyboardInterrupt:
+            save = "n"
+        if save not in ("n", "no", "н", "нет"):
+            path = generate_fragment_client_config(
+                packets=winner["packets"], length=winner["length"],
+                interval=winner["interval"], label="fragment_recommended",
+            )
+            if path:
+                _patch_fp_in_config(path, _fp_from_state(state))
+                _success(f"Сохранено: {path}")
+                _log("INFO",
+                     f"fuzzer-B winner: packets={winner['packets']} "
+                     f"length={winner['length']} interval={winner['interval']} "
+                     f"ttfb={winner['ttfb_ms']}мс label={winner['label']}")
+    else:
+        _warn("Успешных результатов не получено")
+
+    input(f"\n{BLUE}Нажмите Enter...{NC}")
+
+
+# =============================================================================
+#  ГЛАВНОЕ МЕНЮ (точка входа из _core.py)
+# =============================================================================
+
+def do_fragment_fuzzer_menu() -> None:
+    """
+    Интерактивное меню подбора фрагментации.
+    Точка входа из _core.py (Меню 4 → F2): do_fragment_fuzzer_menu()
+    """
+    while True:
+        os.system("clear")
+        print()
+        _box_top("🔬  FUZZER ФРАГМЕНТАЦИИ")
+        _box_desc(
+            "Автоматический подбор оптимальных параметров fragment: "
+            "packets / length / interval."
+        )
+        _box_sep()
+        _box_row(f"  {BOLD}[A]{NC}  Тест с VPS  {DIM}(ориентировочный, без DPI){NC}")
+        _box_row(
+            f"  {DIM}Запускает временный Xray на сервере, делает TLS Handshake "
+            f"к {_TEST_HOST}. Быстро, но DPI на пути VPS→интернет "
+            f"отсутствует.{NC}"
+        )
+        _box_sep()
+        _box_row(f"  {BOLD}[B]{NC}  Тест с клиента  {DIM}(точный, рекомендуется){NC}")
+        _box_row(
+            f"  {DIM}Генерирует {len(_FUZZ_MATRIX)} конфигов. Вы тестируете со "
+            f"своего устройства через реальный маршрут c DPI. "
+            f"Коллектор автоматически собирает результаты.{NC}"
+        )
+        _box_sep()
+        _box_item("A", "Тест с VPS")
+        _box_item("B", f"Тест с клиента  {DIM}(конфиги + коллектор){NC}")
+        _box_row()
+        _box_back()
+        _box_bottom()
+
+        try:
+            ch = input(f"{CYAN}Выбор:{NC} ").strip().lower()
+        except KeyboardInterrupt:
+            break
+
+        if ch == "a":
+            _run_mode_a()
+        elif ch == "b":
+            _run_mode_b()
+        elif ch in ("q", ""):
+            break
+        else:
+            _warn("Неверный выбор")
+            time.sleep(1)
+
+
+def _run_mode_a() -> None:
+    os.system("clear")
+    print()
+    _box_top(f"  {CYAN}FUZZER — РЕЖИМ A: ТЕСТ С VPS{NC}")
+    _box_warn("Результат ориентировочный — DPI между VPS и интернетом не проверяется.")
+    _box_desc(
+        f"Перебирает {len(_FUZZ_MATRIX)} комбинаций × {_FUZZ_REPEATS} попыток. "
+        f"FP берётся из вашего конфига. "
+        f"/etc/xray/config.json не затрагивается."
+    )
+    _box_bottom()
+    print()
 
     if not _XRAY_BIN.exists():
         _warn(f"Xray не найден: {_XRAY_BIN}")
         input(f"\n{BLUE}Нажмите Enter...{NC}")
         return
 
-    # ── Выбор порта ──────────────────────────────────────────────────────
-    fuzz_port = _find_free_port(_FUZZ_SOCKS_PORT_PREF)
-    if fuzz_port is None:
-        _warn(f"Не удалось найти свободный порт в диапазоне "
-              f"{_FUZZ_SOCKS_PORT_PREF}–{_FUZZ_SOCKS_PORT_PREF + 19}")
-        fuzz_port = None
-
-    print()
-    if fuzz_port:
-        _info(f"Свободный порт найден автоматически: {fuzz_port}")
-        try:
-            port_input = input(
-                f"{CYAN}Использовать порт {fuzz_port}? "
-                f"(Enter — да, или введите другой):{NC} "
-            ).strip()
-        except KeyboardInterrupt:
-            return
-        if port_input:
-            if port_input.isdigit() and 1024 <= int(port_input) <= 65535:
-                fuzz_port = int(port_input)
-                if not _port_free(fuzz_port):
-                    _warn(f"Порт {fuzz_port} занят. Выберите другой.")
-                    input(f"\n{BLUE}Нажмите Enter...{NC}")
-                    return
-            else:
-                _warn("Некорректный порт. Введите число от 1024 до 65535.")
-                input(f"\n{BLUE}Нажмите Enter...{NC}")
-                return
-    else:
-        _warn("Авто-поиск порта не дал результата.")
-        try:
-            port_input = input(
-                f"{CYAN}Введите порт вручную (1024–65535):{NC} "
-            ).strip()
-        except KeyboardInterrupt:
-            return
-        if port_input.isdigit() and 1024 <= int(port_input) <= 65535:
-            fuzz_port = int(port_input)
-            if not _port_free(fuzz_port):
-                _warn(f"Порт {fuzz_port} тоже занят.")
-                input(f"\n{BLUE}Нажмите Enter...{NC}")
-                return
-        else:
-            _warn("Некорректный порт.")
-            input(f"\n{BLUE}Нажмите Enter...{NC}")
-            return
-
-    _info(f"Будет использован порт: {fuzz_port}")
-    print()
-
-    try:
-        confirm = input(f"{CYAN}Начать подбор? [y/N]:{NC} ").strip().lower()
-    except KeyboardInterrupt:
+    state = _load_state()
+    if state is None:
+        input(f"\n{BLUE}Нажмите Enter...{NC}")
         return
 
+    fp = _fp_from_state(state)
+    _info(f"Fingerprint: {BOLD}{fp}{NC}")
+    _info(f"Сервер: {state.get('domain','?')}:{state.get('server_port',443)}")
+    print()
+
+    fuzz_port = _find_free_port(_FUZZ_SOCKS_PORT_PREF)
+    if fuzz_port is None:
+        _warn(f"Свободный порт не найден (начиная с {_FUZZ_SOCKS_PORT_PREF})")
+        input(f"\n{BLUE}Нажмите Enter...{NC}")
+        return
+
+    try:
+        confirm = input(f"{CYAN}Начать? [y/N]:{NC} ").strip().lower()
+    except KeyboardInterrupt:
+        return
     if confirm not in ("y", "yes", "д", "да"):
         return
 
-    print()
     best = run_fragment_fuzzer(state, socks_port=fuzz_port)
     print()
 
     if best is None:
-        print(f"{RED}{'═'*60}{NC}")
-        print(f"{RED}  Ни один вариант фрагментации не прошёл тест.{NC}")
-        print(f"{YELLOW}  Возможные причины:{NC}")
-        print(f"  • VPS недоступен / порт закрыт")
-        print(f"  • {_TEST_HOST} недоступен через VPS")
-        print(f"  • Фрагментация не поддерживается версией Xray")
-        print(f"{RED}{'═'*60}{NC}")
+        _box_top("РЕЗУЛЬТАТ")
+        _box_warn("Ни один вариант не прошёл тест.")
+        _box_row(f"  {DIM}Проверьте: доступен ли сервер, открыт ли порт, работает ли Xray.{NC}")
+        _box_bottom()
     else:
-        rate_pct  = int(best["success_rate"] * 100)
-        ttfb_ms   = int(best["avg_ttfb"] * 1000) if best["avg_ttfb"] != float("inf") else 9999
-        label     = (f"packets={best['packets']} "
-                     f"length={best['length']} "
-                     f"interval={best['interval']} мс")
-
-        print(f"{GREEN}{'═'*60}{NC}")
-        print(f"{GREEN}  ✅  ОПТИМАЛЬНАЯ ФРАГМЕНТАЦИЯ НАЙДЕНА{NC}")
-        print(f"{GREEN}{'═'*60}{NC}")
-        print(f"  {BOLD}packets :{NC}  {best['packets']}")
-        print(f"  {BOLD}length  :{NC}  {best['length']} байт")
-        print(f"  {BOLD}interval:{NC}  {best['interval']} мс")
-        print(f"  {DIM}Успешность: {rate_pct}%  |  Avg TTFB: {ttfb_ms} мс{NC}")
+        rate_pct = int(best["success_rate"] * 100)
+        ttfb_ms  = int(best["avg_ttfb"] * 1000) if best["avg_ttfb"] != float("inf") else 9999
+        _box_top("РЕЗУЛЬТАТ — РЕЖИМ A")
+        _box_ok(f"Лучший вариант  (успешность: {rate_pct}%,  ttfb: {ttfb_ms}мс)")
+        _box_row()
+        _box_row(f"  {BOLD}packets :{NC}  {best['packets']}")
+        _box_row(f"  {BOLD}length  :{NC}  {best['length']} байт")
+        _box_row(f"  {BOLD}interval:{NC}  {best['interval']} мс")
+        _box_sep()
+        _box_warn(
+            "Для подтверждения запустите Режим B и проверьте с клиентского устройства."
+        )
+        _box_bottom()
         print()
-        print(f"  {YELLOW}Рекомендация:{NC}")
-        print(f"  Для вашего провайдера оптимальна фрагментация ClientHello")
-        print(f"  на пакеты {best['length']} байт с интервалом {best['interval']} мс")
-        print(f"{GREEN}{'═'*60}{NC}")
 
-        print()
         try:
-            save = input(f"{CYAN}Сохранить рекомендованный конфиг? [Y/n]:{NC} ").strip().lower()
+            save = input(
+                f"  {CYAN}Сохранить как fragment_recommended.json? [Y/n]:{NC} "
+            ).strip().lower()
         except KeyboardInterrupt:
             save = "n"
-
         if save not in ("n", "no", "н", "нет"):
             path = generate_fragment_client_config(
-                packets=best["packets"],
-                length=best["length"],
-                interval=best["interval"],
-                label="fragment_recommended",
+                packets=best["packets"], length=best["length"],
+                interval=best["interval"], label="fragment_recommended",
             )
             if path:
-                _success(f"Конфиг сохранён: {path}")
-                _info("Скопируйте на клиентское устройство (Xray / v2rayNG / Nekoray)")
+                _patch_fp_in_config(path, _fp_from_state(state))
+                _success(f"Сохранено: {path}")
+                _log("INFO",
+                     f"fuzzer-A winner: packets={best['packets']} "
+                     f"length={best['length']} interval={best['interval']} "
+                     f"ttfb={ttfb_ms}мс")
 
     input(f"\n{BLUE}Нажмите Enter...{NC}")
+
+
+def _run_mode_b() -> None:
+    state = _load_state()
+    if state is None:
+        input(f"\n{BLUE}Нажмите Enter...{NC}")
+        return
+    run_client_fuzzer(state)
