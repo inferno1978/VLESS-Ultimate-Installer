@@ -174,13 +174,38 @@ def _box_row(text: str = "") -> None:
         cut = 0
         import unicodedata as _ud
         for i, ch in enumerate(plain):
-            acc += 2 if _ud.east_asian_width(ch) in ('W', 'F') else 1
+            acc += 2 if _ud.east_asian_width(ch) in ("W", "F") else 1
             if acc > _BOX_W - 1:
                 cut = i; break
         text = text[:cut] + "…"
         w = _wlen(text)
     pad = max(0, _BOX_W - w)
-    print(f"{CYAN}║{NC}{text}{' ' * pad}{CYAN}║{NC}")
+    print(f"{CYAN}║{NC}{text}{chr(32) * pad}{CYAN}║{NC}")
+
+def _box_wrap(text: str, indent: str = "  ") -> None:
+    """Выводит текст с переносом по словам внутри рамки."""
+    max_w = _BOX_W
+    words = _plain(text).split()
+    line = indent
+    line_w = _wlen(indent)
+    indent_w = _wlen(indent)
+    for word in words:
+        ww = _wlen(word)
+        sep_w = 1 if line_w > indent_w else 0
+        if line_w + sep_w + ww > max_w:
+            pad = max(0, max_w - line_w)
+            print(f"{CYAN}║{NC}{line}{chr(32) * pad}{CYAN}║{NC}")
+            line = indent + word
+            line_w = indent_w + ww
+        else:
+            if line_w > indent_w:
+                line += " "
+                line_w += 1
+            line += word
+            line_w += ww
+    if _plain(line).strip():
+        pad = max(0, max_w - line_w)
+        print(f"{CYAN}║{NC}{line}{chr(32) * pad}{CYAN}║{NC}")
 
 def _box_info(msg: str) -> None:
     _box_row(f"  {CYAN}→{NC}  {msg}")
@@ -242,7 +267,10 @@ def mss_select_interactive() -> str:
             f"{BOLD}{label}{NC}{star}"
         )
         _box_row(header)
-        _box_row(f"       {DIM}{mss_str}  —  {detail[:48]}{NC}")
+        # Первая строка detail: метка MSS
+        _box_row(f"       {DIM}{mss_str}{NC}")
+        # Полный текст detail с переносом по словам
+        _box_wrap(detail, indent="       ")
         _box_row()
 
     _box_sep()
