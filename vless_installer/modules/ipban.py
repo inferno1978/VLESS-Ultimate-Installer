@@ -366,7 +366,7 @@ def _fetch_asn_prefixes(asn: str) -> List[str]:
     for attempt in range(1, 4):
         try:
             req = urllib.request.Request(
-                url, headers={"User-Agent": "xray-installer/4.12.7",
+                url, headers={"User-Agent": "xray-installer/4.12.8",
                               "Accept": "application/json"}
             )
             with urllib.request.urlopen(req, timeout=30) as resp:

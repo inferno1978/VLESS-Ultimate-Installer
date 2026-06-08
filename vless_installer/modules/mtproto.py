@@ -107,6 +107,15 @@ def _get_fallback_module():
     except ImportError:
         return None
 
+# MSS-фрагментация против TSPU JA4: telemt_mss_selector.py
+def _get_mss_module():
+    """Lazy-import telemt_mss_selector — изолирует ошибки импорта."""
+    try:
+        from vless_installer.modules import telemt_mss_selector as _mss_mod
+        return _mss_mod
+    except ImportError:
+        return None
+
 def _TG_NETS_current() -> list:
     """Возвращает актуальный список подсетей TG (файл → встроенный)."""
     return _get_tg_nets()
@@ -439,10 +448,12 @@ def _save_users(users: dict) -> None:
     CONFIG_FILE.write_text(content)
 
 def _write_config(port, ipv4, ipv6, tls_domain, users, use_middle_proxy,
-                  socks5_port: int = 0, fallback_cfg=None) -> None:
+                  socks5_port: int = 0, fallback_cfg=None,
+                  client_mss: str = "") -> None:
     """
     socks5_port > 0  →  upstream через локальный SOCKS5 (xray), иначе direct.
     fallback_cfg     →  FallbackConfig (из telemt_fallback); None = не писать секцию.
+    client_mss       →  пресет MSS для TSPU anti-JA4 ("tspu", "2in8", числовой или "").
     """
     CONFIG_DIR.mkdir(parents=True, exist_ok=True)
     WORK_DIR.mkdir(parents=True, exist_ok=True)
@@ -457,10 +468,15 @@ def _write_config(port, ipv4, ipv6, tls_domain, users, use_middle_proxy,
     ]
     if ipv4: lines += ['[[server.listeners]]', 'ip = "0.0.0.0"', ""]
     if ipv6: lines += ['[[server.listeners]]', 'ip = "::"', ""]
-    lines += [
+    censorship_lines = [
         "[timeouts]", "client_handshake = 300", "client_keepalive = 60", "client_ack = 300",
         "", "[censorship]", f'tls_domain = "{tls_domain}"',
         "mask = true", "mask_port = 443", "fake_cert_len = 2048",
+    ]
+    if client_mss:
+        censorship_lines.append(f'client_mss = "{client_mss}"')
+    lines += censorship_lines
+    lines += [
         "", "[access]", "replay_check_len = 65536", "ignore_time_skew = false",
         "", "[access.users]",
     ]
@@ -1413,6 +1429,18 @@ def _run_install_inner(server_ip: str, server_ipv6: str) -> None:
         port = 8443
 
     tls_domain = _select_domain()
+
+    # ── MSS-фрагментация против TSPU JA4 DPI ─────────────────────────────────
+    # Шаг обязателен при сервере в РФ; safe skip для прочих регионов.
+    # Модуль telemt_mss_selector изолирован — ошибка импорта не ломает установку.
+    _client_mss = ""
+    _mss_mod = _get_mss_module()
+    if _mss_mod is not None:
+        try:
+            _client_mss = _mss_mod.mss_select_interactive()
+        except Exception as _me:
+            _warn(f"Шаг MSS пропущен: {_me}")
+            _client_mss = ""
     # ── Регион сервера: РФ / страна с блокировкой Telegram ─────────────────
     # _is_direct_ip() возвращает True если IP напрямую на интерфейсе (не NAT).
     # Это не означает доступность ME-серверов: в РФ они заблокированы.
@@ -1539,7 +1567,7 @@ def _run_install_inner(server_ip: str, server_ipv6: str) -> None:
     _info("Генерирую конфиг...")
     # telemt всегда в режиме direct — xray перехватывается на уровне iptables
     _write_config(port, ipv4, ipv6, tls_domain, users, use_mp, socks5_port=0,
-                  fallback_cfg=_fb_cfg)
+                  fallback_cfg=_fb_cfg, client_mss=_client_mss)
     _ok(f"Конфиг: {CONFIG_FILE}")
 
     _info("Устанавливаю зависимости...")
@@ -1638,6 +1666,12 @@ def _run_install_inner(server_ip: str, server_ipv6: str) -> None:
         _box_ok(f"Xray:    dokodemo :{XRAY_TPROXY_PORT} + iptables REDIRECT → {_cascade_label} ✓")
     else:
         _box_warn("Xray:    не используется (direct — Telegram может быть заблокирован)")
+    # MSS anti-JA4 статус
+    _mss_mod_summary = _get_mss_module()
+    if _mss_mod_summary is not None:
+        _box_ok(f"MSS:     {_mss_mod_summary.mss_status_line(_client_mss)}")
+    elif _client_mss:
+        _box_ok(f"MSS:     {_client_mss}")
     _box_row(); _box_sep()
     _box_row(f"  {DIM}journalctl -u telemt -f   # логи{NC}")
     _box_bot()
