@@ -474,15 +474,9 @@ def _write_config(port, ipv4, ipv6, tls_domain, users, use_middle_proxy,
         "mask = true", "mask_port = 443", "fake_cert_len = 2048",
     ]
     if client_mss:
-        mss_val = client_mss if not client_mss.lstrip('-').isdigit() and client_mss else client_mss
-        # client_mss должен быть на верхнем уровне конфига (до любых секций)
-        # Числовые значения — без кавычек, named алиасы (tspu, 2in8) — со строкой
-        if client_mss.lstrip('-').isdigit():
-            lines.insert(1, f'client_mss = {client_mss}')
-            lines.insert(2, '')
-        else:
-            lines.insert(1, f'client_mss = "{client_mss}"')
-            lines.insert(2, '')
+        # client_mss принадлежит секции [server] (ServerConfig struct).
+        # Тип всегда String — числа тоже в кавычках ("256", "tspu", "2in8" и т.д.)
+        lines.insert(lines.index(f'port = {port}') + 1, f'client_mss = "{client_mss}"')
     lines += censorship_lines
     lines += [
         "", "[access]", "replay_check_len = 65536", "ignore_time_skew = false",
