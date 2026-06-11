@@ -3983,7 +3983,7 @@ def _make_exit_node_config(nd: dict) -> dict:
     return {
         "_comment": comment,
         "log": {
-            "loglevel": "warning",
+            "loglevel": "info",
             "access": "/var/log/xray/access.log",
             "error": "/var/log/xray/error.log"
         },
