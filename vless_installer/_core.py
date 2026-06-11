@@ -71,6 +71,7 @@ from vless_installer.modules.ipset_persist   import (
 from vless_installer.modules.ipban import do_manage_ipban
 from vless_installer.modules.turntunnel import do_turntunnel_menu
 from vless_installer.modules.slipgate import do_slipgate_menu
+from vless_installer.modules.wdtt import do_wdtt_menu
 from vless_installer.modules.ripe_file_age   import (
     check_ripe_file_age, ripe_file_age_banner,
 )
@@ -29646,11 +29647,15 @@ def main_menu() -> None:
             _box_row(f"     {DIM}DNS-туннели (DNSTT, NoizDNS, Slipstream) — обход полных блокировок{NC}")
             _box_row()
             _box_sep()
+            _box_row(f"  {CYAN}10{NC} 🔒 {TITLE}qWDTT (WireGuard/TURN){NC}")
+            _box_row(f"     {DIM}WireGuard через TURN ВКонтакте — пароли, TTL, Telegram-бот{NC}")
+            _box_row()
+            _box_sep()
             _box_row(f"  {DIM}[{NC}{TITLE}{BOLD}0{NC}{DIM}]{NC}  🚪 Выход")
             _box_bottom()
             _BOX_W = _BOX_W_saved
             print()
-            choice = input(f"{CYAN}Выбор (1–9 / 0):{NC} ").strip()
+            choice = input(f"{CYAN}Выбор (1–10 / 0):{NC} ").strip()
         except KeyboardInterrupt:
             print()
             print(f"{GREEN}До свидания! 👋{NC}")
@@ -29700,6 +29705,13 @@ def main_menu() -> None:
                 do_slipgate_menu()
             except ImportError as _e:
                 warn(f"Модуль SlipGate не найден: {_e}")
+                time.sleep(2)
+
+        elif choice == "10":
+            try:
+                do_wdtt_menu()
+            except ImportError as _e:
+                warn(f"Модуль qWDTT не найден: {_e}")
                 time.sleep(2)
 
         elif choice == "0":
