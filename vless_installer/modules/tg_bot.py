@@ -748,6 +748,18 @@ def do_manage_telegram() -> None:
         events  = cfg.get("events", {})
         configured = bool(token and chat_id)
 
+        # event_labels определён здесь — доступен во всех ветках ch
+        event_labels = {
+            "xray_down":    "Xray упал / не отвечает",
+            "xray_up":      "Xray восстановился",
+            "cert_expire":  "Сертификат истекает (< 30 дней)",
+            "traffic_limit":"Трафик пользователя превысил лимит",
+            "health_report":"Ежедневный health-отчёт (08:00)",
+            "node_down":    "Exit-нода недоступна",
+            "port_blocked": "Порт заблокирован ТСПУ",
+            "autoban":      "AutoBan — IP забанен автоматически",
+        }
+
         print()
         _box_top("🔔  Telegram-уведомления (admin)")
         _box_row(f"  Статус:  {''+GREEN+'НАСТРОЕН'+NC if configured else ''+YELLOW+'НЕ НАСТРОЕН'+NC}")
@@ -755,16 +767,6 @@ def do_manage_telegram() -> None:
             _box_row(f"  Токен:   {DIM}{token[:10]}...{NC}")
             _box_row(f"  Chat ID: {CYAN}{chat_id}{NC}")
             _box_row(f"  {BOLD}Включённые события:{NC}")
-            event_labels = {
-                "xray_down":    "Xray упал / не отвечает",
-                "xray_up":      "Xray восстановился",
-                "cert_expire":  "Сертификат истекает (< 30 дней)",
-                "traffic_limit":"Трафик пользователя превысил лимит",
-                "health_report":"Ежедневный health-отчёт (08:00)",
-                "node_down":    "Exit-нода недоступна",
-                "port_blocked": "Порт заблокирован ТСПУ",
-                "autoban":      "AutoBan — IP забанен автоматически",
-            }
             for ev, label in event_labels.items():
                 en = events.get(ev, True)
                 col = GREEN if en else DIM

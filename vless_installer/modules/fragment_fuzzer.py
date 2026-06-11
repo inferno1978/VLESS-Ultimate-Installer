@@ -378,9 +378,10 @@ def run_fragment_fuzzer(state: dict, socks_port: int = _FUZZ_SOCKS_PORT_PREF) ->
             rate     = len(ok) / len(meas) if meas else 0.0
             avg_ttfb = sum(ok) / len(ok) if ok else float("inf")
 
+            ttfb_ms = int(avg_ttfb * 1000) if avg_ttfb != float("inf") else 99999
             if rate > 0:
                 print(f"  {GREEN}✓{NC}  {int(rate*100):3d}%  "
-                      f"{DIM}ttfb={int(avg_ttfb*1000)}мс{NC}")
+                      f"{DIM}ttfb={ttfb_ms}мс{NC}")
             else:
                 print(f"  {RED}✗{NC}  все попытки провалились")
 
@@ -388,7 +389,7 @@ def run_fragment_fuzzer(state: dict, socks_port: int = _FUZZ_SOCKS_PORT_PREF) ->
                 "packets": packets, "length": length, "interval": interval,
                 "label": label, "avg_ttfb": avg_ttfb, "success_rate": rate,
             })
-            _log("INFO", f"{desc} → ok={rate:.2f} ttfb={int(avg_ttfb*1000)}мс")
+            _log("INFO", f"{desc} → ok={rate:.2f} ttfb={ttfb_ms}мс")
             time.sleep(1.0)
 
     ranked = sorted(results, key=lambda r: (-r["success_rate"], r["avg_ttfb"]))
