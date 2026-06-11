@@ -25261,9 +25261,21 @@ def _parse_access_log() -> list:
 def _audit_user_summary() -> None:
     print()
     info("Анализ access.log...")
-    entries = _parse_access_log()
+    all_entries = _parse_access_log()
+    entries = [e for e in all_entries if e.get("action", "").lower() == "accepted"]
     if not entries:
-        warn("Нет данных для анализа")
+        log_path = Path("/var/log/xray/access.log")
+        if not log_path.exists():
+            warn("access.log не найден — xray не запущен или путь не задан в config.json")
+        elif log_path.stat().st_size == 0:
+            warn("access.log пустой — xray запущен с loglevel=warning")
+            info("Для аудита подключений нужен loglevel=info в config.json → перезапустите xray")
+        elif not all_entries:
+            warn("access.log есть, но записи не распознаны — нестандартный формат")
+        else:
+            warn("access.log есть, но записи 'accepted' не найдены")
+            info("Причина: loglevel=warning — xray не пишет подключения при таком уровне")
+            info("Для аудита: config.json → log.loglevel = 'info', затем перезапустите xray")
         return
 
     from collections import defaultdict
