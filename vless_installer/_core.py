@@ -25207,8 +25207,9 @@ def _parse_access_log() -> list:
     entries = []
     # Формат Xray: 2024/01/15 12:34:56 accepted tcp:1.2.3.4:1234 ... email:user@domain
     pattern = re.compile(
-        r'(?P<date>\d{4}/\d{2}/\d{2})\s+(?P<time>\d{2}:\d{2}:\d{2})\s+'
-        r'(?P<action>\w+)\s+(?P<proto>\w+):(?P<src_ip>[^:]+):(?P<src_port>\d+)'
+        r'(?P<date>\d{4}/\d{2}/\d{2})\s+(?P<time>\d{2}:\d{2}:\d{2})(?:\.\d+)?\s+'
+        r'(?:from\s+(?P<from_ip>[^:]+):\d+\s+)?'
+        r'(?P<action>\w+)\s+(?P<proto>\w+):(?P<dst_ip>[^:]+):(?P<src_port>\d+)'
         r'(?:\s+(?P<dst>\S+))?(?:\s+\[(?P<tag>[^\]]*)\])?'
         r'(?:.*?email:(?P<email>\S+))?'
     )
@@ -25231,7 +25232,7 @@ def _parse_access_log() -> list:
                 except Exception:
                     pass
                 action = m.group("action") or ""
-                src_ip = m.group("src_ip") or ""
+                src_ip = m.group("from_ip") or m.group("dst_ip") or ""
                 email  = m.group("email")  or ""
             else:
                 m2 = re.match(r'(\d{4}/\d{2}/\d{2})\s+(\d{2}:\d{2}:\d{2})\s+(\w+)', line)
