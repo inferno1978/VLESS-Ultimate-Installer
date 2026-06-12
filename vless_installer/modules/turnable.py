@@ -446,28 +446,31 @@ def _get_installed_version() -> Optional[str]:
     return m.group(1) if m else "unknown"
 
 # ══════════════════════════════════════════════════════════════════════════════
-#  KEYGEN — генерация ключей через сам бинарник
+#  KEYGEN — генерация X25519 ключей через Python
 # ══════════════════════════════════════════════════════════════════════════════
 def _keygen() -> Optional[tuple[str, str]]:
     """
-    Запускает 'turnable keygen', парсит priv_key и pub_key.
+    Генерирует пару X25519 ключей (priv_key, pub_key) в base64.
+    Turnable v0.4.1 не имеет команды keygen — ключи совместимы,
+    т.к. Turnable использует стандартный X25519 ECDH.
     Возвращает (priv_key, pub_key) или None при ошибке.
     """
     try:
-        r = subprocess.run(
-            [str(_BIN_PATH), "keygen"],
-            capture_output=True, text=True, encoding="utf-8",
-            errors="replace", cwd=str(_BIN_DIR),
+        from cryptography.hazmat.primitives.asymmetric.x25519 import X25519PrivateKey
+        from cryptography.hazmat.primitives.serialization import (
+            Encoding, PublicFormat, PrivateFormat, NoEncryption,
         )
-        out = (r.stdout or "") + (r.stderr or "")
-        priv = re.search(r'priv_key\s*[=:]\s*(\S+)', out)
-        pub  = re.search(r'pub_key\s*[=:]\s*(\S+)', out)
-        if priv and pub:
-            return priv.group(1), pub.group(1)
-        # Альтернативный формат — две строки подряд
-        lines = [l.strip() for l in out.splitlines() if l.strip()]
-        if len(lines) >= 2:
-            return lines[0], lines[1]
+        import base64
+        priv = X25519PrivateKey.generate()
+        priv_b64 = base64.b64encode(
+            priv.private_bytes(Encoding.Raw, PrivateFormat.Raw, NoEncryption())
+        ).decode()
+        pub_b64 = base64.b64encode(
+            priv.public_key().public_bytes(Encoding.Raw, PublicFormat.Raw)
+        ).decode()
+        return priv_b64, pub_b64
+    except ImportError:
+        _err("Нет библиотеки cryptography: pip install cryptography --break-system-packages")
         return None
     except Exception as e:
         _err(f"keygen ошибка: {e}")
