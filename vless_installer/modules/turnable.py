@@ -473,20 +473,22 @@ def _ensure_kyber_py() -> bool:
 
 def _keygen() -> Optional[tuple[str, str]]:
     """
-    Генерирует пару ML-KEM-768 ключей (priv_key, pub_key) в base64.
-    Turnable использует ML-KEM (FIPS 203) — не X25519.
-    Encapsulation key (pub): 1184 байта, Decapsulation key (priv): 2400 байта.
-    Команды 'turnable keygen' нет в v0.4.1 (только в README будущей версии).
+    Генерирует пару ML-KEM-768 ключей через key_derive(seed).
+    Turnable хранит 64-байтный seed как priv_key и encapsulation key как pub_key.
+    seed = d(32 байта) + z(32 байта) — стандарт FIPS 203 Section 7.1.
+    pub_key (ek): 1184 байта в base64 — передаётся клиенту.
+    priv_key (seed): 64 байта в base64 — остаётся на сервере.
     Возвращает (priv_key, pub_key) или None при ошибке.
     """
     if not _ensure_kyber_py():
         return None
     try:
-        import base64
+        import base64, os
         from kyber_py.ml_kem import ML_KEM_768
-        ek, dk = ML_KEM_768.keygen()
+        seed = os.urandom(64)          # d(32) + z(32)
+        ek, _ = ML_KEM_768.key_derive(seed)
         pub_b64  = base64.b64encode(ek).decode()
-        priv_b64 = base64.b64encode(dk).decode()
+        priv_b64 = base64.b64encode(seed).decode()
         return priv_b64, pub_b64
     except Exception as e:
         _err(f"keygen ошибка: {e}")
