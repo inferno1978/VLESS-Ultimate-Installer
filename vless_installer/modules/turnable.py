@@ -446,32 +446,48 @@ def _get_installed_version() -> Optional[str]:
     return m.group(1) if m else "unknown"
 
 # ══════════════════════════════════════════════════════════════════════════════
-#  KEYGEN — генерация X25519 ключей через Python
+#  KEYGEN — генерация ML-KEM-768 ключей (постквантовая криптография)
 # ══════════════════════════════════════════════════════════════════════════════
+def _ensure_kyber_py() -> bool:
+    """Устанавливает kyber-py если не установлена."""
+    try:
+        from kyber_py.ml_kem import ML_KEM_768  # noqa: F401
+        return True
+    except ImportError:
+        pass
+    _info("Устанавливаю kyber-py (ML-KEM-768 для Turnable)...")
+    import subprocess as _sp
+    r = _sp.run(
+        [sys.executable, "-m", "pip", "install", "kyber-py",
+         "--break-system-packages", "-q"],
+        capture_output=True, text=True,
+    )
+    try:
+        from kyber_py.ml_kem import ML_KEM_768  # noqa: F401
+        _ok("kyber-py установлен.")
+        return True
+    except ImportError:
+        _err(f"Не удалось установить kyber-py: {r.stderr[-200:]}")
+        return False
+
+
 def _keygen() -> Optional[tuple[str, str]]:
     """
-    Генерирует пару X25519 ключей (priv_key, pub_key) в base64.
-    Turnable v0.4.1 не имеет команды keygen — ключи совместимы,
-    т.к. Turnable использует стандартный X25519 ECDH.
+    Генерирует пару ML-KEM-768 ключей (priv_key, pub_key) в base64.
+    Turnable использует ML-KEM (FIPS 203) — не X25519.
+    Encapsulation key (pub): 1184 байта, Decapsulation key (priv): 2400 байта.
+    Команды 'turnable keygen' нет в v0.4.1 (только в README будущей версии).
     Возвращает (priv_key, pub_key) или None при ошибке.
     """
-    try:
-        from cryptography.hazmat.primitives.asymmetric.x25519 import X25519PrivateKey
-        from cryptography.hazmat.primitives.serialization import (
-            Encoding, PublicFormat, PrivateFormat, NoEncryption,
-        )
-        import base64
-        priv = X25519PrivateKey.generate()
-        priv_b64 = base64.b64encode(
-            priv.private_bytes(Encoding.Raw, PrivateFormat.Raw, NoEncryption())
-        ).decode()
-        pub_b64 = base64.b64encode(
-            priv.public_key().public_bytes(Encoding.Raw, PublicFormat.Raw)
-        ).decode()
-        return priv_b64, pub_b64
-    except ImportError:
-        _err("Нет библиотеки cryptography: pip install cryptography --break-system-packages")
+    if not _ensure_kyber_py():
         return None
+    try:
+        import base64
+        from kyber_py.ml_kem import ML_KEM_768
+        ek, dk = ML_KEM_768.keygen()
+        pub_b64  = base64.b64encode(ek).decode()
+        priv_b64 = base64.b64encode(dk).decode()
+        return priv_b64, pub_b64
     except Exception as e:
         _err(f"keygen ошибка: {e}")
         return None
