@@ -2,6 +2,113 @@
 
 ---
 
+## v4.12.8-patch5 — 14 июня 2026 — NaiveProxy + Mieru: HTTPS/mTLS маскировка трафика
+
+### Контекст
+
+Два новых протокола для обхода DPI-фильтрации. Оба модуля написаны
+в едином стиле проекта — без сторонних зависимостей, чистое удаление,
+встроенный гайд, QR-коды для клиентов.
+
+### NaiveProxy (`naiveproxy.py`)
+
+**Принцип:** HTTPS/HTTP2 с Chromium fingerprint + probe resistance.
+DPI видит легитимный HTTPS трафик к домену. Зонды РКН видят фейковый сайт.
+
+**Схема:**
+```
+Клиент (Karing/NekoBox/ShadowRocket)
+  │  HTTPS/HTTP2 + Chromium fingerprint
+  ▼
+caddy-forwardproxy-naive :443
+  │  probe resistance → фейковый сайт для незнакомых клиентов
+  ▼
+Интернет
+```
+
+**Каскад Entry→Exit:**
+```
+Клиент → caddy-naive Entry (RU) → upstream → caddy-naive Exit (EU) → Интернет
+```
+
+**Что делает модуль:**
+- Скачивает caddy-forwardproxy-naive (prebuilt amd64)
+- Генерирует Caddyfile с probe resistance и basicauth
+- Создаёт фейковый HTML-сайт для незнакомых клиентов
+- Systemd-сервис с `CAP_NET_BIND_SERVICE` (без root)
+- Открывает TCP 443 в iptables
+- Управление пользователями с bcrypt хешированием паролей
+- Каскад Entry→Exit через upstream в Caddyfile
+- Генерация `naive+https://` ссылок и QR-кодов
+- Встроенный гайд: DNS, probe resistance, каскад, клиенты
+
+**Требования:** домен с A-записью на VPS, порт 443/tcp
+
+**Клиенты:** Karing, NekoBox (Android), ShadowRocket (iOS), naiveproxy CLI
+
+---
+
+### Mieru (`mieru.py`)
+
+**Принцип:** mTLS + рандомный padding — трафик без паттернов.
+Не требует домена. Временная метка защищает от replay-атак.
+
+**Схема:**
+```
+Клиент (Karing / Nekobox / sing-box)
+  │  mTLS + random padding + timestamp
+  ▼
+mita :2012-2022 (диапазон портов)
+  │  проверка ±30 сек, встроенный SOCKS5
+  ▼
+Интернет
+```
+
+**Что делает модуль:**
+- Скачивает mita (сервер) и mieru (CLI) с GitHub (amd64/arm64)
+- Устанавливает chrony если нет NTP-синхронизации
+- Применяет конфиг через `mita apply config`
+- Systemd-сервис `mita`
+- Открывает диапазон TCP/UDP портов в iptables
+- Управление пользователями с hot-reload конфига
+- Проверка NTP-синхронизации в статусе
+- Генерация `mieru://` ссылок, sing-box JSON outbound и QR-кодов
+- Встроенный гайд: как работает, синхронизация времени, TCP vs UDP
+
+**Требования:** только IP и порт, домен не нужен
+
+**Клиенты:** Karing, Nekobox (Android), sing-box CLI
+
+---
+
+### Интеграция в `_core.py`
+
+- Пункт **11** в главном меню: `🔐 NaiveProxy`
+- Пункт **12** в главном меню: `🔒 Mieru`
+- Промпт выбора обновлён до `1–12 / 0`
+- Импорты `do_naiveproxy_menu`, `do_mieru_menu`
+
+### Что не затрагивается
+
+- Xray `config.json` и VLESS-inbound
+- `state.json` инсталлера
+- iptables-правила других модулей
+- Любые другие службы
+
+### NaiveProxy vs Mieru — когда что выбрать
+
+| | NaiveProxy | Mieru |
+|---|---|---|
+| Маскировка | HTTPS/H2 Chromium | mTLS + random padding |
+| Домен | Обязателен | Не нужен |
+| Probe resistance | ✓ | — |
+| Синхронизация времени | — | ±30 сек обязательно |
+| Клиенты | Karing, NekoBox, ShadowRocket | Karing, NekoBox, sing-box |
+
+---
+
+---
+
 ## v4.12.8-patch2 — 12 июня 2026 — VK Turn Tunnel: два клиента, два модуля
 
 ### Контекст

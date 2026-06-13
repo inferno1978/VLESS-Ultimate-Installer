@@ -72,6 +72,8 @@ from vless_installer.modules.ipban import do_manage_ipban
 from vless_installer.modules.vkturn_menu import do_vkturn_menu
 from vless_installer.modules.slipgate import do_slipgate_menu
 from vless_installer.modules.wdtt import do_wdtt_menu
+from vless_installer.modules.naiveproxy import do_naiveproxy_menu
+from vless_installer.modules.mieru import do_mieru_menu
 from vless_installer.modules.ripe_file_age   import (
     check_ripe_file_age, ripe_file_age_banner,
 )
@@ -29657,11 +29659,19 @@ def main_menu() -> None:
             _box_row(f"     {DIM}WireGuard через TURN ВКонтакте — пароли, TTL, Telegram-бот{NC}")
             _box_row()
             _box_sep()
+            _box_row(f"  {CYAN}11{NC} 🔐 {TITLE}NaiveProxy{NC}")
+            _box_row(f"     {DIM}HTTPS/HTTP2 + Chromium fingerprint + probe resistance{NC}")
+            _box_row()
+            _box_sep()
+            _box_row(f"  {CYAN}12{NC} 🔒 {TITLE}Mieru{NC}")
+            _box_row(f"     {DIM}mTLS + random padding — маскировка без домена{NC}")
+            _box_row()
+            _box_sep()
             _box_row(f"  {DIM}[{NC}{TITLE}{BOLD}0{NC}{DIM}]{NC}  🚪 Выход")
             _box_bottom()
             _BOX_W = _BOX_W_saved
             print()
-            choice = input(f"{CYAN}Выбор (1–10 / 0):{NC} ").strip()
+            choice = input(f"{CYAN}Выбор (1–12 / 0):{NC} ").strip()
         except KeyboardInterrupt:
             print()
             print(f"{GREEN}До свидания! 👋{NC}")
@@ -29718,6 +29728,20 @@ def main_menu() -> None:
                 do_wdtt_menu()
             except ImportError as _e:
                 warn(f"Модуль qWDTT не найден: {_e}")
+                time.sleep(2)
+
+        elif choice == "11":
+            try:
+                do_naiveproxy_menu()
+            except ImportError as _e:
+                warn(f"Модуль NaiveProxy не найден: {_e}")
+                time.sleep(2)
+
+        elif choice == "12":
+            try:
+                do_mieru_menu()
+            except ImportError as _e:
+                warn(f"Модуль Mieru не найден: {_e}")
                 time.sleep(2)
 
         elif choice == "0":
