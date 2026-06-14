@@ -647,6 +647,8 @@ def _run_install_inner() -> None:
 
     # 7. Systemd — сначала установить и запустить сервис,
     #    т.к. mita apply config работает через Unix-сокет запущенного демона
+    #    /etc/mita должна существовать до старта — mita проверяет её при запуске
+    _CFG_DIR.mkdir(parents=True, exist_ok=True)
     _install_service()
     _run(["systemctl", "start", _SERVICE_NAME])
     time.sleep(2)
