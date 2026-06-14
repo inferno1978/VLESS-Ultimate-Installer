@@ -634,10 +634,18 @@ def _run_install_inner() -> None:
         print(f"  {GREEN}✓{NC}  Создан первый пользователь: "
               f"{YELLOW}{first_user}{NC} / {YELLOW}{first_pass}{NC}")
 
-    # 5. Системный пользователь mita (требуется для Unix-сокета)
+    # 5. Чистим остатки предыдущих установок
+    _run(["systemctl", "stop",    _SERVICE_NAME])
+    _run(["systemctl", "disable", _SERVICE_NAME])
+    if _SERVICE_FILE.exists():
+        _SERVICE_FILE.unlink()
+    _run(["systemctl", "daemon-reload"])
+    _run(["systemctl", "reset-failed"], capture=True)
+
+    # 6. Системный пользователь mita (требуется для Unix-сокета)
     _ensure_mita_user()
 
-    # 6. Systemd — сначала установить и запустить сервис,
+    # 7. Systemd — сначала установить и запустить сервис,
     #    т.к. mita apply config работает через Unix-сокет запущенного демона
     _install_service()
     _run(["systemctl", "start", _SERVICE_NAME])
