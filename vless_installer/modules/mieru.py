@@ -365,7 +365,7 @@ def _build_server_config(users: list, port_start: int, port_end: int,
     return {
         "portBindings": port_bindings,
         "users": user_entries,
-        "loggingLevel": "WARNING",
+        "loggingLevel": "INFO",
         "mtu": 1400,
     }
 
