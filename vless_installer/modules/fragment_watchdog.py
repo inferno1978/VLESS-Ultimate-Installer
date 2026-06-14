@@ -124,9 +124,9 @@ def wlog(msg: str) -> None:
 
 def load_state() -> dict:
     try:
-        return json.loads(STATE_FILE.read_text()) if STATE_FILE.exists() else {{}}
+        return json.loads(STATE_FILE.read_text()) if STATE_FILE.exists() else {}
     except Exception:
-        return {{}}
+        return {}
 
 def save_state(s: dict) -> None:
     try:
