@@ -1054,13 +1054,36 @@ def _show_singbox_json(users: list, server_ip: str,
         server_ip, port_start, port_end, protocol,
         user["username"], user["password"],
     )
-    json_str = json.dumps(outbound, indent=2, ensure_ascii=False)
+
+    # Полный sing-box конфиг для импорта в Karing
+    full_config = {
+        "log": {"level": "info"},
+        "dns": {
+            "servers": [
+                {"tag": "google", "address": "8.8.8.8"},
+                {"tag": "local", "address": "1.1.1.1", "detour": "direct"}
+            ]
+        },
+        "outbounds": [
+            outbound,
+            {"type": "direct", "tag": "direct"}
+        ],
+        "route": {"final": outbound["tag"]}
+    }
+    json_str = json.dumps(full_config, indent=2, ensure_ascii=False)
+
+    # Сохраняем в файл чтобы можно было скопировать
+    cfg_path = Path(f"/tmp/karing-mieru-{user['username']}.json")
+    cfg_path.write_text(json_str)
 
     os.system("clear")
-    _box_top("📋  SING-BOX OUTBOUND JSON")
+    _box_top("📋  SING-BOX КОНФИГ ДЛЯ KARING")
     _box_row()
-    _box_info("Вставьте в секцию outbounds вашего sing-box конфига:")
+    _box_ok(f"Конфиг сохранён: {cfg_path}")
     _box_row()
+    _box_info("Импорт в Karing: Добавить подписку → вставить путь к файлу или JSON")
+    _box_warn("mierus:// ссылка НЕ работает в Karing — используйте JSON файл!")
+    _box_row(); _box_sep()
     for line in json_str.splitlines():
         _box_row(f"  {DIM}{line}{NC}")
     _box_row(); _box_bot()
