@@ -621,31 +621,35 @@ def _gen_singbox_outbound(server_ip: str, port_start: int, port_end: int,
     """
     Генерирует sing-box outbound для mieru.
     Импортируется в Karing / Nekobox / sing-box CLI.
-    Spec: https://sing-box.sagernet.org/configuration/outbound/mieru/
-    Поля: server, server_port, transport, password — username НЕ является
-    отдельным полем outbound в sing-box, оно не передаётся.
+    Проверено на рабочем конфиге:
+      - server_port: int (один порт, НЕ диапазон строкой)
+      - username: обязателен
+      - multiplexing: "MULTIPLEXING_HIGH" — обязателен для Karing
     """
-    port_entry = port_start if port_start == port_end else f"{port_start}-{port_end}"
     return {
         "type": "mieru",
         "tag": f"mieru-{username}",
         "server": server_ip,
-        "server_port": port_entry,
+        "server_port": port_start,
         "transport": protocol.upper(),
+        "username": username,
         "password": password,
+        "multiplexing": "MULTIPLEXING_HIGH",
     }
 
 def _gen_client_share_link(server_ip: str, port_start: int, port_end: int,
                             protocol: str, username: str, password: str) -> str:
     """
     Генерирует mierus:// share link для Karing (sing-box).
-    Формат: mierus://user:pass@host?port=PORT&protocol=TCP&profile=default&mtu=1400
-    Документация: https://github.com/enfein/mieru/blob/main/docs/client-install.md
+    Karing парсит ссылку в sing-box outbound JSON.
+    Требования (проверено на рабочем конфиге):
+      - server_port должен быть одним портом (int), не диапазоном
+      - multiplexing=MULTIPLEXING_HIGH обязателен
+    Используем port_start как основной порт.
     """
-    port_str = str(port_start) if port_start == port_end else f"{port_start}-{port_end}"
     return (
         f"mierus://{username}:{password}@{server_ip}"
-        f"?port={port_str}&protocol={protocol.upper()}&profile=default&mtu=1400"
+        f"?port={port_start}&protocol={protocol.upper()}&profile=default&mtu=1400&multiplexing=MULTIPLEXING_HIGH"
     )
 
 def _gen_client_share_link_nekobox(server_ip: str, port_start: int,
