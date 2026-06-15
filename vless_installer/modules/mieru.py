@@ -294,6 +294,74 @@ def _get_download_urls(version: str) -> tuple[str, str]:
     mieru_url = f"{base}/mieru_{version}_linux_{arch}.tar.gz"
     return mita_url, mieru_url
 
+def _install_mita_package(version: str) -> bool:
+    """
+    Устанавливает mita используя пакетный менеджер (deb/rpm) если доступен,
+    иначе fallback на tar.gz. После установки через пакет бинарник оказывается
+    в /usr/bin/mita — создаём симлинк на _MITA_BIN если нужно.
+    """
+    arch = "amd64" if _is_amd64() else "arm64"
+    tmp = Path(tempfile.mkdtemp())
+    try:
+        # --- Debian/Ubuntu (.deb) ---
+        if shutil.which("dpkg"):
+            deb_file = f"mita_{version}_{arch}.deb"
+            url = f"https://github.com/enfein/mieru/releases/download/v{version}/{deb_file}"
+            local = tmp / deb_file
+            print(f"  {CYAN}→{NC}  Скачиваю mita {version} (.deb)...")
+            try:
+                urllib.request.urlretrieve(url, str(local))
+                r = _run(["dpkg", "-i", str(local)], capture=True)
+                if r.returncode == 0:
+                    # dpkg кладёт бинарник в /usr/bin/mita
+                    sys_bin = Path("/usr/bin/mita")
+                    if sys_bin.exists() and not _MITA_BIN.exists():
+                        _MITA_BIN.parent.mkdir(parents=True, exist_ok=True)
+                        shutil.copy2(str(sys_bin), str(_MITA_BIN))
+                        _MITA_BIN.chmod(0o755)
+                    elif sys_bin.exists():
+                        shutil.copy2(str(sys_bin), str(_MITA_BIN))
+                        _MITA_BIN.chmod(0o755)
+                    print(f"  {GREEN}✓{NC}  mita {version} установлен через dpkg.")
+                    return True
+                else:
+                    print(f"  {YELLOW}⚠{NC}  dpkg завершился с ошибкой, пробую tar.gz...")
+            except Exception as e:
+                print(f"  {YELLOW}⚠{NC}  Ошибка .deb: {e}, пробую tar.gz...")
+
+        # --- RPM (RedHat/CentOS) ---
+        elif shutil.which("rpm"):
+            rpm_arch = "x86_64" if _is_amd64() else "aarch64"
+            rpm_file = f"mita-{version}-1.{rpm_arch}.rpm"
+            url = f"https://github.com/enfein/mieru/releases/download/v{version}/{rpm_file}"
+            local = tmp / rpm_file
+            print(f"  {CYAN}→{NC}  Скачиваю mita {version} (.rpm)...")
+            try:
+                urllib.request.urlretrieve(url, str(local))
+                r = _run(["rpm", "-Uvh", "--force", str(local)], capture=True)
+                if r.returncode == 0:
+                    sys_bin = Path("/usr/bin/mita")
+                    if sys_bin.exists():
+                        _MITA_BIN.parent.mkdir(parents=True, exist_ok=True)
+                        shutil.copy2(str(sys_bin), str(_MITA_BIN))
+                        _MITA_BIN.chmod(0o755)
+                    print(f"  {GREEN}✓{NC}  mita {version} установлен через rpm.")
+                    return True
+                else:
+                    print(f"  {YELLOW}⚠{NC}  rpm завершился с ошибкой, пробую tar.gz...")
+            except Exception as e:
+                print(f"  {YELLOW}⚠{NC}  Ошибка .rpm: {e}, пробую tar.gz...")
+
+        # --- Fallback: tar.gz ---
+        mita_url, mieru_url = _get_download_urls(version)
+        result = _download_binary(mita_url, _MITA_BIN, "mita")
+        if result:
+            _download_binary(mieru_url, _MIERU_BIN, "mieru")
+        return result
+
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
 def _download_binary(url: str, dest: Path, name: str) -> bool:
     tmp = Path(tempfile.mkdtemp())
     try:
@@ -669,15 +737,13 @@ def _run_install_inner() -> None:
     _box_bot(); print()
     version = _get_latest_version()
     if version == "unknown":
-        print(f"  {YELLOW}⚠{NC}  Не удалось определить версию, использую 1.17.0")
-        version = "1.17.0"
+        print(f"  {YELLOW}⚠{NC}  Не удалось определить версию, использую 3.33.0")
+        version = "3.33.0"
     print(f"  {GREEN}✓{NC}  Версия: {version}")
 
-    # 2. Бинарники
-    mita_url, mieru_url = _get_download_urls(version)
-    if not _download_binary(mita_url, _MITA_BIN, "mita"):
+    # 2. Бинарники — используем .deb если доступен dpkg, иначе tar.gz
+    if not _install_mita_package(version):
         print(f"  {RED}✗{NC}  Не удалось установить mita."); _pause(); return
-    _download_binary(mieru_url, _MIERU_BIN, "mieru")  # опционально, не критично
 
     # 3. Синхронизация времени
     print(f"  {CYAN}→{NC}  Проверяю синхронизацию времени...")
