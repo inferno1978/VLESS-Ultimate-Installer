@@ -362,7 +362,7 @@ def _build_caddyfile(domain: str, port: int, users: list,
     if upstream:
         upstream_line = f"        upstream {upstream}\n"
 
-    caddyfile = f"""{{\n    http_port 0\n    auto_https off\n}}\n\n{domain}:{port} {{\n    tls {{
+    caddyfile = f"""{{\n    http_port 0\n}}\n\n{domain}:{port} {{\n    tls {{
         on_demand
     }}
     route {{
@@ -619,11 +619,25 @@ def _run_install_inner() -> None:
     print(f"  {GREEN}✓{NC}  Фейковый сайт создан: {_FAKE_SITE_DIR}")
 
     # 5. Caddyfile + сервис
+    # Caddy нужен порт 80 для ACME HTTP-01 challenge — останавливаем конкурентов
+    _nginx_was_running = False
+    r80 = _run(["ss", "-tlpn"], capture=True)
+    if ":80 " in r80.stdout or ":80	" in r80.stdout or " :80" in r80.stdout:
+        r_nginx = _run(["systemctl", "is-active", "nginx"], capture=True)
+        if r_nginx.stdout.strip() == "active":
+            _run(["systemctl", "stop", "nginx"])
+            _nginx_was_running = True
+            print(f"  {YELLOW}⚠{NC}  nginx остановлен (нужен порт 80 для TLS сертификата).")
     _install_service()
     err = _apply_config(domain, port, users, fake_url, probe_secret, upstream)
     if err:
         print(f"  {RED}✗{NC}  {err}")
         _pause(); return
+
+    # 5b. Возвращаем nginx если останавливали
+    if _nginx_was_running:
+        _run(["systemctl", "start", "nginx"])
+        print(f"  {GREEN}✓{NC}  nginx возвращён.")
 
     # 6. iptables
     _ipt_open_tcp(port)
