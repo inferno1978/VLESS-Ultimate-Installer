@@ -356,7 +356,7 @@ def _build_caddyfile(domain: str, port: int, users: list,
         # caddy-naive принимает bcrypt хеш или plaintext с {sha1}prefix
         # Используем формат: username <bcrypt_hash>
         # Для простоты храним plaintext и хэшируем через caddy hash-password
-        auth_lines += f"        basicauth {u['username']} {u['password_hash']}\n"
+        auth_lines += f"            basic_auth {u['username']} {u['password_hash']}\n"
 
     upstream_line = ""
     if upstream:
