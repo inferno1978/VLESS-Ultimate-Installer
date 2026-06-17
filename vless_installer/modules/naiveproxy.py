@@ -362,8 +362,7 @@ def _build_caddyfile(domain: str, port: int, users: list,
     if upstream:
         upstream_line = f"        upstream {upstream}\n"
 
-    caddyfile = f"""{domain}:{port} {{
-    tls {{
+    caddyfile = f"""{{\n    http_port 0\n}}\n\n{domain}:{port} {{\n    tls {{
         on_demand
     }}
     route {{
