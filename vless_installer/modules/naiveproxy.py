@@ -367,16 +367,25 @@ def _build_caddyfile(domain: str, port: int, users: list,
         tls_block = f"    tls {cert_file} {key_file}"
     else:
         tls_block = "    tls {\n        on_demand\n    }"
-    caddyfile = f"""{{\n    http_port 0\n}}\n\n{domain}:{port} {{\n{tls_block}
-    route {{
-        forward_proxy {{
+
+    # ВАЖНО (см. официальную документацию klzgrad/forwardproxy):
+    # ":{port} must appear first" в списке match-доменов, иначе forward_proxy
+    # может работать непредсказуемо. Также обязательна глобальная
+    # директива "order forward_proxy before file_server".
+    caddyfile = f"""{{
+    http_port 0
+    order forward_proxy before file_server
+}}
+
+:{port}, {domain}:{port} {{
+{tls_block}
+    forward_proxy {{
 {auth_lines}            hide_ip
             hide_via
             probe_resistance {probe_secret}
-{upstream_line}        }}
-        file_server {{
-            root {_FAKE_SITE_DIR}
-        }}
+{upstream_line}    }}
+    file_server {{
+        root {_FAKE_SITE_DIR}
     }}
     log {{
         output file {_LOG_DIR}/access.log {{
