@@ -296,7 +296,6 @@ def _gen_singbox_outbound(domain: str, port: int, username: str, password: str) 
         "server_port": port,
         "username": username,
         "password": password,
-        "network": "tcp",
         "tls": {
             "enabled": True,
             "server_name": domain,
