@@ -374,10 +374,11 @@ def _build_caddyfile(domain: str, port: int, users: list,
     # basicauth блок
     auth_lines = ""
     for u in users:
-        # caddy-naive принимает bcrypt хеш или plaintext с {sha1}prefix
-        # Используем формат: username <bcrypt_hash>
-        # Для простоты храним plaintext и хэшируем через caddy hash-password
-        auth_lines += f"            basic_auth {u['username']} {u['password_hash']}\n"
+        # ВАЖНО: эта сборка caddy-forwardproxy-naive (klzgrad, v2.11.x)
+        # сверяет basic_auth с PLAINTEXT-паролем, а не с bcrypt-хешем.
+        # bcrypt-хеш в basic_auth приводит к 401/308 даже при верном пароле
+        # (probe_resistance маскирует это под редирект на fake-site).
+        auth_lines += f"            basic_auth {u['username']} {u['password']}\n"
 
     upstream_line = ""
     if upstream:
