@@ -76,6 +76,7 @@ import sys
 import tempfile
 import time
 import urllib.request
+import urllib.parse
 from pathlib import Path
 from typing import Optional
 
@@ -258,6 +259,26 @@ def _run(cmd: list, capture: bool = False, check: bool = False,
 def _gen_password(length: int = 16) -> str:
     chars = "ABCDEFGHJKLMNPQRSTUVWXYZabcdefghjkmnpqrstuvwxyz23456789"
     return ''.join(secrets.choice(chars) for _ in range(length))
+
+def _build_naive_link(domain: str, port: int, username: str, password: str, tag: str = "") -> str:
+    """
+    Строит корректную naive+https:// ссылку по спецификации:
+    https://github.com/klzgrad/naiveproxy/issues/86
+
+    Обязательно:
+      - URL-кодирование username/password (на случай спецсимволов)
+      - завершающий "/" после host:port — без него некоторые клиенты
+        (Exclave, NekoBox+) не распознают строку как proxy-ссылку и
+        пытаются интерпретировать её как subscription URL
+      - "#tag" в конце — описательное имя профиля; его отсутствие может
+        мешать некоторым парсерам корректно выделить конец ссылки
+    """
+    user_q = urllib.parse.quote(username, safe="")
+    pass_q = urllib.parse.quote(password, safe="")
+    link = f"naive+https://{user_q}:{pass_q}@{domain}:{port}/"
+    if tag:
+        link += f"#{urllib.parse.quote(tag, safe='')}"
+    return link
 
 def _gen_probe_secret() -> str:
     return secrets.token_urlsafe(24)
@@ -852,7 +873,7 @@ def _add_user(state: dict) -> None:
 
     domain = state.get("domain", "—")
     port   = state.get("port", _DEFAULT_PORT)
-    naive_link = f"naive+https://{username}:{password}@{domain}:{port}"
+    naive_link = _build_naive_link(domain, port, username, password, tag=username)
 
     os.system("clear")
     _box_top("✅  ПОЛЬЗОВАТЕЛЬ ДОБАВЛЕН")
@@ -892,7 +913,7 @@ def _show_user_link(users: list, domain: str, port: int) -> None:
     except (ValueError, IndexError):
         print(f"  {RED}✗{NC}  Неверный номер."); _pause(); return
 
-    naive_link = f"naive+https://{user['username']}:{user['password']}@{domain}:{port}"
+    naive_link = _build_naive_link(domain, port, user['username'], user['password'], tag=user['username'])
     os.system("clear")
     _box_top(f"🔗  {user['username']}  •  NAIVEPROXY")
     _box_row()
@@ -1137,7 +1158,7 @@ def _guide_clients() -> None:
     _box_sep()
     _box_row(f"  {BOLD}{WHITE}Формат ссылки:")
     _box_row()
-    _box_row(f"  {YELLOW}naive+https://логин:пароль@{domain}:{port}{NC}")
+    _box_row(f"  {YELLOW}naive+https://логин:пароль@{domain}:{port}/#имя_профиля{NC}")
     _box_row()
     _box_sep()
     _box_row(f"  {BOLD}{WHITE}Клиенты:")
