@@ -345,7 +345,8 @@ def _download_binary() -> bool:
 # ══════════════════════════════════════════════════════════════════════════════
 def _build_caddyfile(domain: str, port: int, users: list,
                      fake_url: str, probe_secret: str,
-                     upstream: str = "") -> str:
+                     upstream: str = "",
+                     cert_file: str = "", key_file: str = "") -> str:
     """
     Генерирует Caddyfile для caddy-forwardproxy-naive.
     upstream — опциональный, для каскада Entry→Exit.
@@ -362,9 +363,11 @@ def _build_caddyfile(domain: str, port: int, users: list,
     if upstream:
         upstream_line = f"        upstream {upstream}\n"
 
-    caddyfile = f"""{{\n    http_port 0\n}}\n\n{domain}:{port} {{\n    tls {{
-        on_demand
-    }}
+    if cert_file and key_file:
+        tls_block = f"    tls {cert_file} {key_file}"
+    else:
+        tls_block = "    tls {\n        on_demand\n    }"
+    caddyfile = f"""{{\n    http_port 0\n}}\n\n{domain}:{port} {{\n{tls_block}
     route {{
         forward_proxy {{
 {auth_lines}            hide_ip
@@ -492,13 +495,15 @@ def _create_fake_site() -> None:
 #  ПРИМЕНЕНИЕ КОНФИГА
 # ══════════════════════════════════════════════════════════════════════════════
 def _apply_config(domain: str, port: int, users: list,
-                  fake_url: str, probe_secret: str, upstream: str = "") -> Optional[str]:
+                  fake_url: str, probe_secret: str, upstream: str = "",
+                  cert_file: str = "", key_file: str = "") -> Optional[str]:
     """Записывает Caddyfile и перезагружает сервис. Возвращает ошибку или None."""
     _CFG_DIR.mkdir(parents=True, exist_ok=True)
     _LOG_DIR.mkdir(parents=True, exist_ok=True)
 
     caddyfile_content = _build_caddyfile(
-        domain, port, users, fake_url, probe_secret, upstream
+        domain, port, users, fake_url, probe_secret, upstream,
+        cert_file=cert_file, key_file=key_file
     )
     _CADDYFILE.write_text(caddyfile_content)
     _CADDYFILE.chmod(0o640)
@@ -619,17 +624,29 @@ def _run_install_inner() -> None:
     print(f"  {GREEN}✓{NC}  Фейковый сайт создан: {_FAKE_SITE_DIR}")
 
     # 5. Caddyfile + сервис
+    # Проверяем — есть ли уже готовый сертификат от VLESS/certbot
+    le_cert = Path(f"/etc/letsencrypt/live/{domain}/fullchain.pem")
+    le_key  = Path(f"/etc/letsencrypt/live/{domain}/privkey.pem")
+    existing_cert = ""
+    existing_key  = ""
+    if le_cert.exists() and le_key.exists():
+        existing_cert = str(le_cert)
+        existing_key  = str(le_key)
+        print(f"  {GREEN}✓{NC}  Найден существующий сертификат Let's Encrypt для {domain}.")
+
     # Caddy нужен порт 80 для ACME HTTP-01 challenge — останавливаем конкурентов
+    # (только если нет готового сертификата)
     _nginx_was_running = False
     r80 = _run(["ss", "-tlpn"], capture=True)
-    if ":80 " in r80.stdout or ":80	" in r80.stdout or " :80" in r80.stdout:
+    if not existing_cert and (":80 " in r80.stdout or ":80	" in r80.stdout or " :80" in r80.stdout):
         r_nginx = _run(["systemctl", "is-active", "nginx"], capture=True)
         if r_nginx.stdout.strip() == "active":
             _run(["systemctl", "stop", "nginx"])
             _nginx_was_running = True
             print(f"  {YELLOW}⚠{NC}  nginx остановлен (нужен порт 80 для TLS сертификата).")
     _install_service()
-    err = _apply_config(domain, port, users, fake_url, probe_secret, upstream)
+    err = _apply_config(domain, port, users, fake_url, probe_secret, upstream,
+                       cert_file=existing_cert, key_file=existing_key)
     if err:
         print(f"  {RED}✗{NC}  {err}")
         _pause(); return
