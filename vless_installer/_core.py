@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
-# === v4.12.8 ===
+# === v4.12.9 ===
 """
-VLESS + TCP + REALITY + xHTTP TLS — Ultimate Installer v4.12.8
+VLESS + TCP + REALITY + xHTTP TLS — Ultimate Installer v4.12.9
 Python 3.12+ port
 
 Поддержка: Ubuntu 20.04/22.04/24.04, Debian 11/12/13
@@ -58,7 +58,7 @@ from datetime import datetime, timezone
 from typing import Any
 import getpass
 
-# ── Модули v4.12.8 ──────────────────────────────────────────────────────────────
+# ── Модули v4.12.9 ──────────────────────────────────────────────────────────────
 from vless_installer.modules.smoke_test      import smoke_test_xray
 from vless_installer.modules.xray_safe_apply import xray_apply_with_smoke
 from vless_installer.modules.nginx_watchdog  import (
@@ -133,7 +133,7 @@ from vless_installer.modules.fragment_stats      import do_fragment_stats_menu
 from vless_installer.modules.fragment_share      import do_fragment_share_menu
 from vless_installer.modules.port_hopping        import do_port_hopping_menu, ph_status
 from vless_installer.modules.tg_bot              import do_tg_bot_menu, do_manage_telegram
-# ── Hysteria2 transport (аддитивно, v4.12.8+) ────────────────────────────────
+# ── Hysteria2 transport (аддитивно, v4.12.9+) ────────────────────────────────
 from vless_installer.modules.hysteria2_menu      import do_hysteria2_menu
 # ── Новые модули (бэкап, cold boot, health monitor) ──────────────────────────
 from vless_installer.modules.config_backup       import backup_xray_config, do_backup_menu
@@ -234,7 +234,7 @@ def die(msg: str) -> None:
     sys.exit(1)
 
 
-log_to_file("INFO", "=== Запуск VLESS Ultimate Installer v4.12.8 ===")
+log_to_file("INFO", "=== Запуск VLESS Ultimate Installer v4.12.9 ===")
 log_to_file("INFO", f"Время начала: {datetime.now()}")
 
 # =============================================================================
@@ -261,7 +261,7 @@ def _make_banner() -> str:
         "  ╚═══╝  ╚══════╝╚══════╝╚══════╝╚══════╝",
     ]
     _info_lines = [
-        "VLESS REALITY + xHTTP TLS INSTALLER v4.12.8",
+        "VLESS REALITY + xHTTP TLS INSTALLER v4.12.9",
         "IPv6 DualStack | 6 Templates | SHA256 Verify",
         "Balancer: RoundRobin | LeastPing | LeastLoad",
         "Dashboard | FP Rotate | GeoCheck | Multi-User",
@@ -5848,7 +5848,7 @@ def install_dnscrypt() -> None:
         'server_names = ["cloudflare", "google"]'
     )
     DNSCRYPT_CONF.write_text(textwrap.dedent(f"""\
-        ## dnscrypt-proxy.toml — сгенерирован VLESS Ultimate Installer v4.12.8
+        ## dnscrypt-proxy.toml — сгенерирован VLESS Ultimate Installer v4.12.9
         ## Слушает на {DNSCRYPT_LISTEN_ADDR}:{DNSCRYPT_LISTEN_PORT}
 
         listen_addresses = ['{DNSCRYPT_LISTEN_ADDR}:{DNSCRYPT_LISTEN_PORT}']
@@ -24327,7 +24327,7 @@ def _fetch_prefixes_for_asn(asn: str) -> list:
         for attempt in range(1, 4):   # до 3 попыток на каждый URL
             try:
                 req = urllib.request.Request(url, headers={
-                    "User-Agent": "xray-installer/4.12.8",
+                    "User-Agent": "xray-installer/4.12.9",
                     "Accept":     "application/json",
                 })
                 with urllib.request.urlopen(req, timeout=30) as resp:
@@ -29617,7 +29617,7 @@ def main_menu() -> None:
             _BOX_W_saved = _BOX_W
             _BOX_W = 64
             _box_top()
-            _box_row(f"  {BOLD}{TITLE}VLESS Ultimate Installer v4.12.8{NC}  {DIM}│{NC}  {mode_str}")
+            _box_row(f"  {BOLD}{TITLE}VLESS Ultimate Installer v4.12.9{NC}  {DIM}│{NC}  {mode_str}")
             _box_sep()
             _box_row()
             _box_row(f"  {CYAN}1{NC}  ⚙️  {TITLE}Установка и Система{NC}")
