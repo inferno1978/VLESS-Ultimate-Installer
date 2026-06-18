@@ -236,9 +236,10 @@ def _get_mita_ports() -> tuple[int, int]:
 # ══════════════════════════════════════════════════════════════════════════════
 def _ensure_iptables_rule(port_start: int, port_end: int, proto: str) -> bool:
     """
-    Проверяет наличие правила iptables для диапазона портов mita.
-    Если правила нет — создаёт его (только ACCEPT-счётчик, без блокировок).
-    Возвращает True если правило уже было или успешно создано.
+    Гарантирует ровно одно iptables-правило для диапазона портов mita.
+    Удаляет все дубли (если накопились от предыдущих запусков),
+    оставляет одно свежее правило с обнулёнными счётчиками.
+    Возвращает True если правило установлено успешно.
     """
     p = proto.lower()
     if port_start == port_end:
@@ -248,22 +249,35 @@ def _ensure_iptables_rule(port_start: int, port_end: int, proto: str) -> bool:
         dport_arg = f"{port_start}:{port_end}"
         check_str = f"dpt:{port_start}:{port_end}"
 
-    try:
-        r = _run(["iptables", "-L", "INPUT", "-n", "-v", "-x"], capture=True)
-        for line in r.stdout.splitlines():
-            if p in line.lower() and check_str in line:
-                return True  # правило уже есть
+    cmd_base = [
+        "iptables", "-D", "INPUT",
+        "-p", p,
+        "--dport", dport_arg,
+        "-j", "ACCEPT",
+        "-m", "comment", "--comment", "mita-stats"
+    ]
 
-        # Правила нет — создаём
-        # -I INPUT 1 гарантирует что счётчик первый (перед DROP-правилами)
-        cmd = [
+    try:
+        # Удаляем все дубли в цикле пока они есть
+        for _ in range(20):
+            r = _run(["iptables", "-L", "INPUT", "-n", "-v", "-x"], capture=True)
+            found = any(
+                p in line.lower() and check_str in line and "mita-stats" in line
+                for line in r.stdout.splitlines()
+            )
+            if not found:
+                break
+            _run(cmd_base)  # -D удаляет первое совпадение
+
+        # Создаём одно чистое правило
+        cmd_add = [
             "iptables", "-I", "INPUT", "1",
             "-p", p,
             "--dport", dport_arg,
             "-j", "ACCEPT",
             "-m", "comment", "--comment", "mita-stats"
         ]
-        r2 = _run(cmd)
+        r2 = _run(cmd_add)
         return r2.returncode == 0
     except Exception:
         return False
@@ -281,6 +295,7 @@ def _iptables_stats(port_start: int, port_end: int, proto: str) -> dict:
     result = {"bytes": 0, "packets": 0}
     try:
         r = _run(["iptables", "-L", "INPUT", "-n", "-v", "-x"], capture=True)
+        # Суммируем все строки с нашим портом (на случай временных дублей)
         for line in r.stdout.splitlines():
             lp = line.lower()
             # Ищем строку с нашим протоколом и портом
@@ -299,9 +314,8 @@ def _iptables_stats(port_start: int, port_end: int, proto: str) -> dict:
             # Формат iptables -vnxL: pkts bytes target prot ...
             if len(parts) >= 2:
                 try:
-                    result["packets"] = int(parts[0])
-                    result["bytes"]   = int(parts[1])
-                    break
+                    result["packets"] += int(parts[0])
+                    result["bytes"]   += int(parts[1])
                 except (ValueError, IndexError):
                     pass
     except Exception:
