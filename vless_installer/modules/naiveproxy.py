@@ -60,6 +60,10 @@ NaiveProxy — HTTPS forward proxy с Chromium fingerprint и probe resistance.
 Точка входа из _core.py:
     from vless_installer.modules.naiveproxy import do_naiveproxy_menu
     do_naiveproxy_menu()
+
+Статистика трафика (отдельный модуль):
+    from vless_installer.modules.naiveproxy_stats import do_naiveproxy_stats_menu
+    do_naiveproxy_stats_menu()
 ───────────────────────────────────────────────────────────────────────────────
 """
 from __future__ import annotations
@@ -1323,6 +1327,7 @@ def do_naiveproxy_menu() -> None:
             _box_item("4", "🔗  Каскад Entry→Exit")
             _box_item("5", "📊  Статус / логи")
             _box_item("6", "📋  sing-box JSON (Karing/Exclave/NekoBox)")
+            _box_item("7", "📈  Статистика трафика")
             _box_sep()
             _box_item("9", f"{RED}🗑️   Удалить NaiveProxy{NC}")
 
@@ -1361,6 +1366,14 @@ def do_naiveproxy_menu() -> None:
                                     users[0]["username"], users[0]["password"])
             else:
                 print(f"  {YELLOW}⚠{NC}  Нет пользователей."); _pause()
+        elif ch == "7" and installed:
+            try:
+                from vless_installer.modules.naiveproxy_stats import do_naiveproxy_stats_menu
+                do_naiveproxy_stats_menu()
+            except ImportError as _e:
+                print(f"  {RED}✗{NC}  Модуль статистики не найден: {_e}"); _pause()
+            except _Cancelled:
+                pass
         elif ch == "9" and installed:
             try: _full_uninstall(silent=False)
             except _Cancelled:

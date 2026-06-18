@@ -59,6 +59,10 @@ Mieru — mTLS туннель с рандомным padding и защитой о
 Точка входа из _core.py:
     from vless_installer.modules.mieru import do_mieru_menu
     do_mieru_menu()
+
+Статистика трафика (отдельный модуль):
+    from vless_installer.modules.mieru_stats import do_mieru_stats_menu
+    do_mieru_stats_menu()
 ───────────────────────────────────────────────────────────────────────────────
 """
 from __future__ import annotations
@@ -1430,6 +1434,7 @@ def do_mieru_menu() -> None:
             _box_item("2", "👥  Управление пользователями")
             _box_item("3", "🔄  Перезапустить сервис")
             _box_item("4", "📊  Статус / логи")
+            _box_item("5", "📈  Статистика трафика")
             _box_sep()
             _box_item("9", f"{RED}🗑️   Удалить Mieru{NC}")
 
@@ -1457,6 +1462,14 @@ def do_mieru_menu() -> None:
             _pause()
         elif ch == "4" and installed:
             _show_status()
+        elif ch == "5" and installed:
+            try:
+                from vless_installer.modules.mieru_stats import do_mieru_stats_menu
+                do_mieru_stats_menu()
+            except ImportError as _e:
+                print(f"\n  {RED}✗{NC}  Модуль статистики не найден: {_e}"); _pause()
+            except _Cancelled:
+                pass
         elif ch == "9" and installed:
             try: _full_uninstall(silent=False)
             except _Cancelled:
