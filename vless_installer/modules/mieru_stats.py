@@ -201,6 +201,75 @@ def _save_cache(data: dict) -> None:
         pass
 
 # ══════════════════════════════════════════════════════════════════════════════
+#  ПОРТЫ: читаем portRange прямо из /etc/mita/server.json
+# ══════════════════════════════════════════════════════════════════════════════
+def _get_mita_ports() -> tuple[int, int]:
+    """
+    Читает portRange из /etc/mita/server.json.
+    Возвращает (port_start, port_end).
+    Поддерживает форматы: "2012", "2012-2022", "2012:2022".
+    """
+    cfg_path = Path("/etc/mita/server.json")
+    try:
+        if cfg_path.exists():
+            data = json.loads(cfg_path.read_text())
+            # portRange может быть в portBindings[0].portRange или верхнем уровне
+            pr = None
+            if "portBindings" in data and data["portBindings"]:
+                pr = data["portBindings"][0].get("portRange", "")
+            if not pr:
+                pr = data.get("portRange", "")
+            if pr:
+                pr = str(pr).strip()
+                for sep in ("-", ":"):
+                    if sep in pr:
+                        parts = pr.split(sep, 1)
+                        return int(parts[0]), int(parts[1])
+                return int(pr), int(pr)
+    except Exception:
+        pass
+    return 2012, 2022
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  IPTABLES: создаём счётчик на диапазон портов mita если его нет
+# ══════════════════════════════════════════════════════════════════════════════
+def _ensure_iptables_rule(port_start: int, port_end: int, proto: str) -> bool:
+    """
+    Проверяет наличие правила iptables для диапазона портов mita.
+    Если правила нет — создаёт его (только ACCEPT-счётчик, без блокировок).
+    Возвращает True если правило уже было или успешно создано.
+    """
+    p = proto.lower()
+    if port_start == port_end:
+        dport_arg = str(port_start)
+        check_str = f"dpt:{port_start}"
+    else:
+        dport_arg = f"{port_start}:{port_end}"
+        check_str = f"dpt:{port_start}:{port_end}"
+
+    try:
+        r = _run(["iptables", "-L", "INPUT", "-n", "-v", "-x"], capture=True)
+        for line in r.stdout.splitlines():
+            if p in line.lower() and check_str in line:
+                return True  # правило уже есть
+
+        # Правила нет — создаём
+        # -I INPUT 1 гарантирует что счётчик первый (перед DROP-правилами)
+        cmd = [
+            "iptables", "-I", "INPUT", "1",
+            "-p", p,
+            "--dport", dport_arg,
+            "-j", "ACCEPT",
+            "-m", "comment", "--comment", "mita-stats"
+        ]
+        r2 = _run(cmd)
+        return r2.returncode == 0
+    except Exception:
+        return False
+
+
+# ══════════════════════════════════════════════════════════════════════════════
 #  ИСТОЧНИК 1: iptables — байты/пакеты
 # ══════════════════════════════════════════════════════════════════════════════
 def _iptables_stats(port_start: int, port_end: int, proto: str) -> dict:
@@ -467,11 +536,17 @@ def _calc_trend(slots: dict) -> str:
 def _show_stats(window_minutes: int = 60) -> None:
     os.system("clear")
     state      = _load_mieru_state()
-    port_start = state.get("port_start", 2012)
-    port_end   = state.get("port_end",   2022)
+    # Читаем порты прямо из /etc/mita/server.json (приоритет над state)
+    port_start, port_end = _get_mita_ports()
+    # Фоллбэк на state только если конфиг не читается
+    if port_start == 2012 and port_end == 2022 and             "port_start" in state:
+        port_start = state.get("port_start", 2012)
+        port_end   = state.get("port_end",   2022)
     proto      = state.get("protocol",   "TCP")
     users      = state.get("users", [])
     version    = state.get("version", "—")
+    # Гарантируем наличие iptables-счётчика для диапазона портов mita
+    _ensure_iptables_rule(port_start, port_end, proto)
 
     port_str = str(port_start) if port_start == port_end else f"{port_start}-{port_end}"
 
@@ -511,8 +586,9 @@ def _show_stats(window_minutes: int = 60) -> None:
             f"{speed_col}{speed_kbps:.1f} кбит/с{NC}")
 
     if ipt["bytes"] == 0:
-        _box_warn("iptables не видит трафика на порту mita.")
-        _box_info("Проверьте правила: iptables -L INPUT -n -v | grep " + str(port_start))
+        _box_warn("iptables-счётчик ещё не накопил трафик — правило создано автоматически.")
+        grep_arg = str(port_start) if port_start == port_end else f"{port_start}:{port_end}"
+        _box_info(f"Для проверки: iptables -L INPUT -n -v -x | grep {grep_arg}")
 
     # ── Активные соединения ───────────────────────────────────────────────────
     active = _active_connections(port_start, port_end, proto)
@@ -593,9 +669,12 @@ def _show_stats(window_minutes: int = 60) -> None:
 def _show_live(interval: int = 30) -> None:
     """Выводит краткую сводку каждые interval секунд. Ctrl+C — выход."""
     state      = _load_mieru_state()
-    port_start = state.get("port_start", 2012)
-    port_end   = state.get("port_end",   2022)
+    port_start, port_end = _get_mita_ports()
+    if port_start == 2012 and port_end == 2022 and "port_start" in state:
+        port_start = state.get("port_start", 2012)
+        port_end   = state.get("port_end",   2022)
     proto      = state.get("protocol",   "TCP")
+    _ensure_iptables_rule(port_start, port_end, proto)
 
     print(f"\n  {CYAN}Живое обновление — Ctrl+C для выхода{NC}\n")
     try:
@@ -667,8 +746,10 @@ def _show_diagnostics() -> None:
     """Детальная диагностика: iptables, ss, NTP, последние 50 строк журнала."""
     os.system("clear")
     state      = _load_mieru_state()
-    port_start = state.get("port_start", 2012)
-    port_end   = state.get("port_end",   2022)
+    port_start, port_end = _get_mita_ports()
+    if port_start == 2012 and port_end == 2022 and "port_start" in state:
+        port_start = state.get("port_start", 2012)
+        port_end   = state.get("port_end",   2022)
     proto      = state.get("protocol",   "TCP")
     port_str   = str(port_start) if port_start == port_end else f"{port_start}-{port_end}"
 
