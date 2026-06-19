@@ -1364,6 +1364,11 @@ def ensure_startup_dependencies() -> None:
 
     Сюда вынесены все пакеты/модули, которые ранее могли устанавливаться
     разбросанно по ходу скрипта (в install_dependencies, отдельных шагах и т.д.).
+
+    Перед фактической установкой пользователю показывается полный список
+    пакетов и запрашивается подтверждение (один раз — согласие сохраняется
+    в /var/lib/xray-installer/.deps_consent, чтобы retry-попытки после сбоя
+    не спрашивали повторно).
     """
 
     # ── Живой прогресс-бар ───────────────────────────────────────────────────
@@ -1406,6 +1411,74 @@ def ensure_startup_dependencies() -> None:
         else:
             r = _run(["rpm", "-q", pkg], capture=True, check=False)
             return r.returncode == 0
+
+    # ── Экран подтверждения зависимостей (один раз за установку) ────────────
+    _consent_flag = Path("/var/lib/xray-installer/.deps_consent")
+    if not _consent_flag.exists():
+        _all_pkgs_apt = (
+            ["psmisc", "gnupg", "lsb-release", "kmod"] +
+            ["curl", "wget", "unzip", "tar", "openssl", "uuid-runtime",
+             "coreutils", "iproute2", "procps", "jq",
+             "ufw", "dnsutils", "zstd", "htop",
+             "ipset", "iptables",
+             "logrotate", "hostname", "iputils-ping",
+             "cron", "file", "openssh-server", "passwd",
+             "git", "make", "golang-go"] +
+            ["nginx", "certbot", "python3-certbot-nginx"] +
+            ["fail2ban", "qrencode", "python3-pip",
+             "irqbalance", "unattended-upgrades"]
+        )
+        _all_pkgs_dnf = (
+            ["psmisc", "gnupg2", "redhat-lsb-core", "kmod"] +
+            ["curl", "wget", "unzip", "tar", "openssl", "util-linux",
+             "coreutils", "iproute", "procps-ng", "jq",
+             "ipset", "iptables",
+             "logrotate", "hostname", "iputils",
+             "cronie", "file", "openssh-server", "shadow-utils",
+             "git", "make", "golang"] +
+            ["nginx", "certbot", "python3-certbot-nginx"] +
+            ["fail2ban", "qrencode", "python3-pip", "irqbalance"]
+        )
+        _all_pkgs = _all_pkgs_apt if PKG_MGR == "apt" else _all_pkgs_dnf
+        # Уже установленные пакеты не показываем отдельно от тех, что
+        # будут ставиться — используем ту же _is_pkg(), что и сама установка.
+        _already    = [p for p in _all_pkgs if _is_pkg(p)]
+        _to_install = [p for p in _all_pkgs if not _is_pkg(p)]
+
+        print()
+        print(f"  {BOLD}{CYAN}Перед началом установки скрипт поставит следующие зависимости:{NC}")
+        print()
+        if _to_install:
+            for i in range(0, len(_to_install), 4):
+                row = _to_install[i:i+4]
+                print("    " + "  ".join(f"{DIM}•{NC} {p}" for p in row))
+        else:
+            print(f"    {DIM}все необходимые пакеты уже установлены{NC}")
+        print()
+        if _already:
+            print(f"  {DIM}Уже установлены и не будут переустанавливаться: "
+                  f"{', '.join(_already)}{NC}")
+            print()
+        print(f"  {YELLOW}Среди них есть пакеты, включающие системные службы "
+              f"(fail2ban, irqbalance,{NC}")
+        print(f"  {YELLOW}unattended-upgrades) — они нужны для работы защиты fail2ban, "
+              f"автообновлений{NC}")
+        print(f"  {YELLOW}безопасности и балансировки прерываний между ядрами CPU.{NC}")
+        print()
+
+        _answer = input(f"  {BOLD}Продолжить установку зависимостей? [Y/n]: {NC}").strip().lower()
+        if _answer in ("n", "no", "н", "нет"):
+            print()
+            info("Установка отменена пользователем. Зависимости не установлены.")
+            info("Запустите скрипт повторно, когда будете готовы продолжить.")
+            sys.exit(0)
+
+        try:
+            _consent_flag.parent.mkdir(parents=True, exist_ok=True)
+            _consent_flag.write_text(datetime.now().isoformat())
+        except Exception:
+            pass
+        print()
 
     # Печатаем заголовок и пустую строку для бара
     info("Проверка и установка зависимостей скрипта...")
