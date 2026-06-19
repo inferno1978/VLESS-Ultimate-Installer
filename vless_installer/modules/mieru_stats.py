@@ -361,38 +361,65 @@ def _iptables_speed(port_start: int, port_end: int, proto: str) -> dict:
     }
 
 # ══════════════════════════════════════════════════════════════════════════════
-#  ИСТОЧНИК 2: journalctl — события соединений
+#  ИСТОЧНИК 2: journalctl — metrics mita
 # ══════════════════════════════════════════════════════════════════════════════
-# Паттерны из логов mita:
-#   INFO  accepted connection from X.X.X.X:PORT
-#   INFO  connection closed ...
-#   ERROR ...
-#   WARNING ...
-#   WARN  ...
-_RE_JNL_TS = re.compile(
-    r"(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2})"       # systemd journal monotonic
-    r"|(\w{3}\s+\d+\s+\d{2}:\d{2}:\d{2})"           # Mmm DD HH:MM:SS
-)
-_RE_ACCEPTED  = re.compile(r"accepted|accept", re.I)
-_RE_CLOSED    = re.compile(r"closed|close|disconnect", re.I)
-_RE_ERROR     = re.compile(r"\berror\b|\bfatal\b|\bpanic\b", re.I)
-_RE_WARN      = re.compile(r"\bwarn(ing)?\b", re.I)
-_RE_AUTH_FAIL = re.compile(r"auth.*fail|invalid.*password|timestamp.*mismatch|"
-                            r"replay|time.*diff", re.I)
+# mita пишет метрики каждые 10 минут в формате:
+#   INFO [metrics - connections] ActiveOpens=N CurrEstablished=N PassiveOpens=N
+#   INFO [metrics - traffic] DownloadBytes=N OutputPaddingBytes=N UploadBytes=N
+#   INFO [metrics - underlay] ActiveOpens=N CurrEstablished=N MaxConn=N PassiveOpens=N
+#   INFO [metrics - user - USERNAME] DownloadBytes=N UploadBytes=N
+#   INFO [metrics - cipher - server] DirectDecrypt=N FailedDirectDecrypt=N ...
+#   INFO [metrics - replay] KnownSession=N NewSession=N NewSessionDecrypted=N
+#   ERROR / WARNING — отдельные строки
+
+_RE_METRICS_CONN    = re.compile(r"\[metrics\s*-\s*connections\].*?ActiveOpens=(\d+).*?CurrEstablished=(\d+).*?PassiveOpens=(\d+)", re.I)
+_RE_METRICS_TRAFFIC = re.compile(r"\[metrics\s*-\s*traffic\].*?DownloadBytes=(\d+).*?UploadBytes=(\d+)", re.I)
+_RE_METRICS_UNDERLAY= re.compile(r"\[metrics\s*-\s*underlay\].*?CurrEstablished=(\d+).*?MaxConn=(\d+).*?PassiveOpens=(\d+)", re.I)
+_RE_METRICS_USER    = re.compile(r"\[metrics\s*-\s*user\s*-\s*([^\]]+)\].*?DownloadBytes=(\d+).*?UploadBytes=(\d+)", re.I)
+_RE_METRICS_REPLAY  = re.compile(r"\[metrics\s*-\s*replay\].*?KnownSession=(\d+).*?NewSession=(\d+)", re.I)
+_RE_AUTH_FAIL       = re.compile(r"FailedDirectDecrypt=(\d+)|FailedHintMatchDecrypt=(\d+)|timestamp.*mismatch|replay", re.I)
+_RE_ERROR           = re.compile(r"\berror\b|\bfatal\b|\bpanic\b", re.I)
+_RE_WARN            = re.compile(r"\bwarn(ing)?\b", re.I)
+
+
+def _parse_kv(line: str) -> dict:
+    """Парсит строку вида Key1=Val1 Key2=Val2 в словарь."""
+    return {m.group(1): m.group(2) for m in re.finditer(r"(\w+)=(\d+)", line)}
+
 
 def _parse_journal(window_minutes: int = 60) -> dict:
     """
     Парсит journalctl -u mita за последние window_minutes минут.
+    mita пишет агрегированные метрики каждые 10 мин — берём последний снимок.
     """
     result = {
-        "accepted": 0,
-        "closed":   0,
-        "errors":   0,
-        "warnings": 0,
-        "auth_fail": 0,
-        "slots":    {},   # 10-мин слоты: {slot: {accepted, errors}}
-        "recent_errors": [],   # последние 5 строк с ошибками
-        "raw_lines": 0,
+        # connections (из последнего [metrics - connections])
+        "active_opens":       0,   # новых TCP-соединений за период
+        "curr_established":   0,   # сейчас активных
+        "passive_opens":      0,   # входящих соединений всего
+        # traffic (из последнего [metrics - traffic], байты)
+        "download_bytes":     0,
+        "upload_bytes":       0,
+        "padding_bytes":      0,
+        # underlay
+        "underlay_curr":      0,
+        "underlay_max":       0,
+        # per-user: {username: {dl, ul}}
+        "users":              {},
+        # replay / auth
+        "known_sessions":     0,
+        "new_sessions":       0,
+        "auth_fail":          0,   # FailedDirectDecrypt суммарно
+        # errors/warnings из нон-metrics строк
+        "errors":             0,
+        "warnings":           0,
+        "recent_errors":      [],
+        # гистограмма по слотам (активность = PassiveOpens delta между снимками)
+        "slots":              {},
+        "raw_lines":          0,
+        # обратная совместимость с UI-кодом
+        "accepted":           0,   # = passive_opens (псевдоним)
+        "closed":             0,
     }
     slots: dict = defaultdict(lambda: {"accepted": 0, "errors": 0, "warnings": 0})
 
@@ -410,39 +437,88 @@ def _parse_journal(window_minutes: int = 60) -> dict:
         lines = r.stdout.splitlines()
         result["raw_lines"] = len(lines)
 
+        prev_passive = None   # для дельты PassiveOpens между снимками
+
         for line in lines:
-            # Извлекаем временную метку из journalctl short-iso формата:
-            # 2026-06-18T14:35:22+0300 hostname mita[PID]: message
+            # Временной слот для гистограммы
             slot = None
-            m = re.match(r"(\d{4}-\d{2}-\d{2}T\d{2}:\d{2})", line)
-            if m:
+            m_ts = re.match(r"(\d{4}-\d{2}-\d{2}T\d{2}:\d{2})", line)
+            if m_ts:
                 try:
-                    dt = datetime.fromisoformat(m.group(1))
+                    dt = datetime.fromisoformat(m_ts.group(1))
                     slot = dt.strftime("%H:%M")[:-1] + "0"
                 except ValueError:
                     pass
 
-            if _RE_ACCEPTED.search(line):
-                result["accepted"] += 1
-                if slot: slots[slot]["accepted"] += 1
+            # ── [metrics - connections] ───────────────────────────────────────
+            m = _RE_METRICS_CONN.search(line)
+            if m:
+                active  = int(m.group(1))
+                curr    = int(m.group(2))
+                passive = int(m.group(3))
+                result["active_opens"]     = active
+                result["curr_established"] = curr
+                result["passive_opens"]    = passive
+                result["accepted"]         = passive  # псевдоним для UI
+                # Дельта PassiveOpens → активность в слоте
+                if slot and prev_passive is not None and passive > prev_passive:
+                    slots[slot]["accepted"] += passive - prev_passive
+                prev_passive = passive
+                continue
 
-            elif _RE_CLOSED.search(line):
-                result["closed"] += 1
+            # ── [metrics - traffic] ───────────────────────────────────────────
+            m = _RE_METRICS_TRAFFIC.search(line)
+            if m:
+                result["download_bytes"] = int(m.group(1))
+                result["upload_bytes"]   = int(m.group(2))
+                kv = _parse_kv(line)
+                result["padding_bytes"]  = int(kv.get("OutputPaddingBytes", 0))
+                continue
 
-            if _RE_AUTH_FAIL.search(line):
-                result["auth_fail"] += 1
+            # ── [metrics - underlay] ──────────────────────────────────────────
+            m = _RE_METRICS_UNDERLAY.search(line)
+            if m:
+                result["underlay_curr"] = int(m.group(1))
+                result["underlay_max"]  = int(m.group(2))
+                continue
 
+            # ── [metrics - user - NAME] ───────────────────────────────────────
+            m = _RE_METRICS_USER.search(line)
+            if m:
+                uname = m.group(1).strip()
+                dl    = int(m.group(2))
+                ul    = int(m.group(3))
+                result["users"][uname] = {"download": dl, "upload": ul}
+                continue
+
+            # ── [metrics - replay] ────────────────────────────────────────────
+            m = _RE_METRICS_REPLAY.search(line)
+            if m:
+                result["known_sessions"] = int(m.group(1))
+                result["new_sessions"]   = int(m.group(2))
+                continue
+
+            # ── FailedDirectDecrypt (из cipher-строки) ────────────────────────
+            if "[metrics - cipher" in line:
+                kv = _parse_kv(line)
+                failed = int(kv.get("FailedDirectDecrypt", 0)) + \
+                         int(kv.get("FailedHintMatchDecrypt", 0))
+                if failed:
+                    result["auth_fail"] += failed
+                continue
+
+            # ── Обычные ERROR / WARNING (не metrics) ──────────────────────────
             if _RE_ERROR.search(line):
                 result["errors"] += 1
-                if slot: slots[slot]["errors"] += 1
+                if slot:
+                    slots[slot]["errors"] += 1
                 if len(result["recent_errors"]) < 5:
-                    # Сохраняем только текст после префикса
                     msg = re.sub(r"^\S+\s+\S+\s+\S+:\s*", "", line)
                     result["recent_errors"].append(msg[:80])
-
             elif _RE_WARN.search(line):
                 result["warnings"] += 1
-                if slot: slots[slot]["warnings"] += 1
+                if slot:
+                    slots[slot]["warnings"] += 1
 
     except Exception:
         pass
@@ -622,26 +698,64 @@ def _show_stats(window_minutes: int = 60) -> None:
 
     _box_sep()
 
-    # ── journalctl ────────────────────────────────────────────────────────────
-    _box_row(f"  {BOLD}{WHITE}Из журнала systemd  (последние {window_minutes} мин):{NC}")
-    _box_row()
-
+    # ── journalctl metrics ────────────────────────────────────────────────────
     jnl = _parse_journal(window_minutes)
 
-    _box_kv("  Принято соед.:", f"{GREEN}{jnl['accepted']}{NC}")
-    _box_kv("  Закрыто соед.:", f"{DIM}{jnl['closed']}{NC}")
+    # ── Connections (из metrics) ──────────────────────────────────────────────
+    _box_row(f"  {BOLD}{WHITE}Соединения (metrics, последний снимок):{NC}")
+    _box_row()
+    _box_kv("  Активных открыто:",   f"{GREEN}{jnl['active_opens']}{NC}")
+    _box_kv("  Установлено сейчас:", f"{CYAN}{jnl['curr_established']}{NC}")
+    _box_kv("  Входящих всего:",     f"{DIM}{jnl['passive_opens']}{NC}")
+    _box_kv("  Underlay-соед.:",
+            f"{DIM}{jnl['underlay_curr']} / max {jnl['underlay_max']}{NC}")
+    if jnl["known_sessions"] or jnl["new_sessions"]:
+        _box_kv("  Сессий (replay):",
+                f"{DIM}known={jnl['known_sessions']} new={jnl['new_sessions']}{NC}")
+
+    # ── Traffic from metrics ──────────────────────────────────────────────────
+    if jnl["download_bytes"] or jnl["upload_bytes"]:
+        _box_sep()
+        _box_row(f"  {BOLD}{WHITE}Трафик mita (metrics, нарастающий итог):{NC}")
+        _box_row()
+        _box_kv("  Получено (↓):", f"{GREEN}{_bytes_human(jnl['download_bytes'])}{NC}")
+        _box_kv("  Отправлено (↑):", f"{YELLOW}{_bytes_human(jnl['upload_bytes'])}{NC}")
+        if jnl["padding_bytes"]:
+            _box_kv("  Padding:", f"{DIM}{_bytes_human(jnl['padding_bytes'])}{NC}")
+
+    # ── Per-user traffic ──────────────────────────────────────────────────────
+    if jnl["users"]:
+        _box_sep()
+        _box_row(f"  {BOLD}{WHITE}Трафик по пользователям:{NC}")
+        _box_row()
+        _box_row(f"  {BOLD}{CYAN}{'Пользователь':<20}  {'Получено':>10}  {'Отправлено':>10}{NC}")
+        _box_sep()
+        for uname, udata in sorted(jnl["users"].items(),
+                                   key=lambda x: x[1]["download"], reverse=True):
+            _box_row(f"  {CYAN}{uname:<20}{NC}  "
+                     f"{GREEN}{_bytes_human(udata['download']):>10}{NC}  "
+                     f"{YELLOW}{_bytes_human(udata['upload']):>10}{NC}")
+
+    # ── Auth / errors ─────────────────────────────────────────────────────────
+    _box_sep()
+    _box_row(f"  {BOLD}{WHITE}Ошибки и авторизация:{NC}")
+    _box_row()
     _box_kv("  Ошибок:",
             f"{RED}{jnl['errors']}{NC}" if jnl['errors'] else f"{DIM}0{NC}")
     _box_kv("  Предупреждений:",
             f"{YELLOW}{jnl['warnings']}{NC}" if jnl['warnings'] else f"{DIM}0{NC}")
     if jnl['auth_fail']:
-        _box_kv("  Сбоев авторизации:",
-                f"{RED}{jnl['auth_fail']}{NC}  {DIM}(время/реплей){NC}")
+        _box_kv("  Сбоев расшифровки:",
+                f"{RED}{jnl['auth_fail']}{NC}  {DIM}(FailedDecrypt/replay){NC}")
     _box_kv("  Строк в журнале:", f"{DIM}{jnl['raw_lines']}{NC}")
 
-    # ── Тренд ─────────────────────────────────────────────────────────────────
-    trend = _calc_trend(jnl["slots"])
-    _box_kv("  Тренд:", trend)
+    # ── Гистограмма ───────────────────────────────────────────────────────────
+    if jnl["slots"]:
+        _box_sep()
+        _box_row(f"  {BOLD}{WHITE}Активность (дельта PassiveOpens по 10-мин):{NC}")
+        _box_row()
+        _render_histogram(jnl["slots"])
+        _box_row()
 
     # ── Последние ошибки ──────────────────────────────────────────────────────
     if jnl["recent_errors"]:
@@ -651,37 +765,18 @@ def _show_stats(window_minutes: int = 60) -> None:
         for msg in jnl["recent_errors"]:
             _box_row(f"  {RED}✗{NC}  {DIM}{msg}{NC}")
 
-    # ── Гистограмма ───────────────────────────────────────────────────────────
-    if jnl["slots"]:
-        _box_sep()
-        _box_row(f"  {BOLD}{WHITE}Активность (10-мин интервалы):{NC}")
-        _box_row()
-        _render_histogram(jnl["slots"])
-        _box_row()
-
-    # ── Статистика по пользователям (если несколько) ──────────────────────────
-    # Mieru не логирует username в журнале — показываем список из state
-    if len(users) > 1:
-        _box_sep()
-        _box_row(f"  {BOLD}{WHITE}Зарегистрированные пользователи:{NC}")
-        _box_row()
-        for u in users:
-            _box_row(f"  {CYAN}{u.get('username','?'):<20}{NC}  "
-                     f"{DIM}порт {port_start}/{proto}{NC}")
-        _box_info("Разбивка трафика по пользователям недоступна — mita не логирует имена.")
-
     # ── Рекомендация ──────────────────────────────────────────────────────────
     _box_sep()
     if not svc_ok:
         _box_err("Сервис mita не запущен — статистика неактуальна.")
         _box_info("Запустите: systemctl start mita")
     elif jnl["auth_fail"] > 5:
-        _box_warn(f"Обнаружено {jnl['auth_fail']} сбоев авторизации.")
+        _box_warn(f"Обнаружено {jnl['auth_fail']} сбоев расшифровки.")
         _box_info("Причина: расхождение времени клиент/сервер > 30 сек (replay).")
         _box_info("Проверьте NTP на клиенте и сервере.")
-    elif jnl["errors"] > jnl["accepted"] * 0.3 and jnl["accepted"] > 0:
-        _box_warn("Много ошибок относительно принятых соединений.")
-    elif ipt["bytes"] == 0 and jnl["accepted"] == 0:
+    elif jnl["errors"] > 0 and jnl["curr_established"] == 0:
+        _box_warn("Есть ошибки, соединений нет.")
+    elif ipt["bytes"] == 0 and jnl["curr_established"] == 0:
         _box_info("Активности нет — сервис готов к подключениям.")
     else:
         _box_ok("Сервис работает штатно.")
@@ -730,11 +825,16 @@ def _show_live(interval: int = 30) -> None:
 
             _box_sep()
 
-            # Последние 5 мин из журнала
-            jnl5 = _parse_journal(5)
-            _box_row(f"  {BOLD}{WHITE}Последние 5 мин:{NC}")
+            # Метрики mita: окно шире 5 мин, т.к. снимки пишутся раз в 10 мин
+            jnl5 = _parse_journal(15)
+            _box_row(f"  {BOLD}{WHITE}Последний снимок metrics:{NC}")
             _box_row()
-            _box_kv("  Принято:", f"{GREEN}{jnl5['accepted']}{NC}")
+            _box_kv("  Установлено сейчас:", f"{CYAN}{jnl5['curr_established']}{NC}")
+            _box_kv("  Входящих всего:",     f"{DIM}{jnl5['passive_opens']}{NC}")
+            if jnl5["download_bytes"] or jnl5["upload_bytes"]:
+                _box_kv("  ↓ / ↑ (итого):",
+                        f"{GREEN}{_bytes_human(jnl5['download_bytes'])}{NC} / "
+                        f"{YELLOW}{_bytes_human(jnl5['upload_bytes'])}{NC}")
             _box_kv("  Ошибок:",
                     f"{RED}{jnl5['errors']}{NC}" if jnl5['errors'] else f"{DIM}0{NC}")
             _box_kv("  Предупреждений:",
