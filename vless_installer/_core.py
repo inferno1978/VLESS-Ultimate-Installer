@@ -8110,6 +8110,20 @@ def setup_nginx_final() -> None:
         rate_limit = ("    limit_req zone=general burst=20 nodelay;\n"
                       "    limit_conn conn_limit 10;")
 
+    # ssl_reject_handshake поддерживается только начиная с nginx 1.19.4.
+    # На более старых версиях используем fallback: явный сертификат + return 444.
+    # ВАЖНО: вычисляем строку ЗАРАНЕЕ, отдельной переменной — нельзя класть
+    # f-string внутрь другого f-string (тернарник на {PARAM_DOMAIN} ломает
+    # парсер на вложенных фигурных скобках, см. CHANGELOG).
+    if nginx_major > 1 or (nginx_major == 1 and nginx_minor >= 19):
+        default_server_ssl = "ssl_reject_handshake on;"
+    else:
+        default_server_ssl = (
+            f"ssl_certificate     /etc/letsencrypt/live/{PARAM_DOMAIN}/fullchain.pem;\n"
+            f"            ssl_certificate_key /etc/letsencrypt/live/{PARAM_DOMAIN}/privkey.pem;\n"
+            f"            return 444;"
+        )
+
     cfg = NGINX_CONF_DIR / PARAM_DOMAIN
     cfg.write_text(textwrap.dedent(f"""\
         # HTTP → HTTPS redirect
@@ -8152,9 +8166,7 @@ def setup_nginx_final() -> None:
         server {{
             {listen_default}
             server_name _;
-            {"ssl_reject_handshake on;" if (nginx_major > 1 or (nginx_major == 1 and nginx_minor >= 19)) else f"""ssl_certificate     /etc/letsencrypt/live/{PARAM_DOMAIN}/fullchain.pem;
-            ssl_certificate_key /etc/letsencrypt/live/{PARAM_DOMAIN}/privkey.pem;
-            return 444;"""}
+            {default_server_ssl}
         }}
     """))
 

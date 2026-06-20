@@ -191,6 +191,35 @@ def _box_kv(key: str, val: str, kw: int = 22) -> None:
     key_pad = kw - _wlen(key_colored)
     _box_row(f"  {key_colored}{' ' * max(0, key_pad)}  {val}")
 
+def _box_log_line(line: str, indent: str = "  ") -> None:
+    """
+    Выводит одну строку журнала (journalctl), разбивая её максимум на 2
+    строки бокса, если она не помещается целиком. Длинные строки (DPI-лог,
+    JSON-ошибки, stack trace) иначе обрезались бы посередине и становились
+    нечитаемыми — см. CHANGELOG.
+
+    Первая строка — с обычным отступом indent, вторая (продолжение) —
+    с тем же отступом плюс "↳ " для визуальной связи со строкой выше.
+    Если текст не уместился и в 2 строки — добавляется "…" в конце.
+    """
+    avail_1 = _BOX_W - _wlen(indent)          # ширина первой строки
+    cont_indent = indent + "↳ "
+    avail_2 = _BOX_W - _wlen(cont_indent)      # ширина второй строки
+
+    plain = line  # journalctl-строки практически всегда без ANSI — без _plain() ок
+    if _wlen(plain) <= avail_1:
+        _box_row(f"{indent}{DIM}{plain}{NC}")
+        return
+
+    # Режем по символам (не по словам — это лог, а не текст для чтения вслух)
+    first_part  = plain[:avail_1]
+    rest        = plain[avail_1:]
+    if _wlen(rest) > avail_2:
+        rest = rest[:max(0, avail_2 - 1)] + "…"
+
+    _box_row(f"{indent}{DIM}{first_part}{NC}")
+    _box_row(f"{cont_indent}{DIM}{rest}{NC}")
+
 def _box_link(link: str, color: str = "") -> None:
     color = color or YELLOW; max_w = _BOX_W - 2; plain_link = _plain(link); i = 0
     while i < len(plain_link):
@@ -1193,7 +1222,7 @@ def _show_status() -> None:
         env={**os.environ, "LANG": "C.UTF-8"},
     )
     for line in (r2.stdout or "Нет записей").splitlines():
-        _box_row(f"  {DIM}{line[:_BOX_W - 4]}{NC}")
+        _box_log_line(line)
     _box_row(); _box_bot()
     _pause()
 

@@ -133,6 +133,29 @@ def _box_kv(key: str, val: str, kw: int = 24) -> None:
     pad = kw - _wlen(key_col)
     _box_row(f"  {key_col}{' ' * max(0, pad)}  {val}")
 
+def _box_log_line(line: str, indent: str = "  ") -> None:
+    """
+    Выводит одну строку лога/дампа (journalctl, iptables, ss, timedatectl),
+    разбивая её максимум на 2 строки бокса, если не помещается целиком —
+    вместо обрезки посередине, которая делала длинные строки нечитаемыми.
+    Вторая строка (продолжение) помечается "↳ " для визуальной связи.
+    """
+    avail_1 = _BOX_W - _wlen(indent)
+    cont_indent = indent + "↳ "
+    avail_2 = _BOX_W - _wlen(cont_indent)
+
+    if _wlen(line) <= avail_1:
+        _box_row(f"{indent}{DIM}{line}{NC}")
+        return
+
+    first_part = line[:avail_1]
+    rest       = line[avail_1:]
+    if _wlen(rest) > avail_2:
+        rest = rest[:max(0, avail_2 - 1)] + "…"
+
+    _box_row(f"{indent}{DIM}{first_part}{NC}")
+    _box_row(f"{cont_indent}{DIM}{rest}{NC}")
+
 # ══════════════════════════════════════════════════════════════════════════════
 #  ВСПОМОГАТЕЛЬНЫЕ
 # ══════════════════════════════════════════════════════════════════════════════
@@ -900,7 +923,7 @@ def _show_diagnostics() -> None:
         found = False
         for line in r.stdout.splitlines():
             if str(port_start) in line or "Chain" in line or "pkts" in line:
-                _box_row(f"  {DIM}{line[:_BOX_W - 4]}{NC}")
+                _box_log_line(line)
                 found = True
         if not found:
             _box_warn("Правило для порта не найдено в iptables INPUT.")
@@ -917,7 +940,7 @@ def _show_diagnostics() -> None:
         found = False
         for line in r.stdout.splitlines():
             if str(port_start) in line or "Recv-Q" in line:
-                _box_row(f"  {DIM}{line[:_BOX_W - 4]}{NC}")
+                _box_log_line(line)
                 found = True
         if not found:
             _box_info("Активных соединений нет.")
@@ -931,7 +954,7 @@ def _show_diagnostics() -> None:
     try:
         r = _run(["timedatectl", "status"], capture=True)
         for line in r.stdout.splitlines():
-            _box_row(f"  {DIM}{line[:_BOX_W - 4]}{NC}")
+            _box_log_line(line)
     except Exception:
         _box_err("timedatectl недоступен")
 
@@ -947,7 +970,7 @@ def _show_diagnostics() -> None:
             env={**os.environ, "LANG": "C.UTF-8"},
         )
         for line in (r.stdout or "Нет записей").splitlines():
-            _box_row(f"  {DIM}{line[:_BOX_W - 4]}{NC}")
+            _box_log_line(line)
     except Exception as e:
         _box_err(f"journalctl ошибка: {e}")
 
