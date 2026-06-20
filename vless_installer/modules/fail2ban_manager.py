@@ -19,6 +19,10 @@ nginx-limit-req: бан за подбор пароли / TLS-ошибки рук
   • Тонкая настройка джейла (bantime / findtime / maxretry)
   • Включение/выключение отдельного джейла
   • Просмотр лога Fail2ban
+  • История банов за сутки — накопительный read-only список всех "Ban"
+    из лога за сегодня (не пропадает при истечении bantime; сам сбрасывается
+    с новых суток по дате в логе — ничего не разбанивает и не хранит
+    отдельного state-файла)
   • Установка Fail2ban "с нуля" или восстановление базовой конфигурации,
     если служба не установлена / конфиг был случайно удалён вручную
     (вызывает ту же setup_fail2ban() из _core.py — единый источник правды
@@ -118,6 +122,13 @@ _STATE_FILE  = Path("/var/lib/xray-installer/state.json")
 _JAIL_LOCAL  = Path("/etc/fail2ban/jail.d/xray-reality.conf")
 _F2B_LOG     = Path("/var/log/fail2ban.log")
 
+# Строка лога вида:
+#   2026-06-21 01:43:30,337 fail2ban.actions [2972974]: NOTICE [sshd] Ban 45.156.87.13
+_BAN_LINE_RE = re.compile(
+    r'^(?P<date>\d{4}-\d{2}-\d{2})\s+(?P<time>\d{2}:\d{2}:\d{2}),\d+\s+'
+    r'fail2ban\.actions\s+\[\d+\]:\s+NOTICE\s+\[(?P<jail>[^\]]+)\]\s+Ban\s+(?P<ip>\S+)'
+)
+
 
 # ── Низкоуровневые обёртки над fail2ban-client / systemd ──────────────────────
 def _f2b_installed() -> bool:
@@ -180,6 +191,59 @@ def _f2b_jail_info(jail: str) -> dict:
             after = s.split(":", 1)[1].strip()
             info["banned_ips"] = after.split() if after else []
     return info
+
+
+# ── История банов за сутки (накопительно, read-only, не влияет на реальный бан) ─
+def _f2b_log_lines() -> list:
+    """
+    Содержимое /var/log/fail2ban.log + предыдущего ротированного файла
+    (fail2ban.log.1, если logrotate уже успел провернуть ротацию сегодня) —
+    чтобы не терять события начала суток, попавшие в файл до ротации.
+    """
+    paths = [_F2B_LOG, Path(str(_F2B_LOG) + ".1")]
+    lines: list = []
+    for p in paths:
+        if not p.exists():
+            continue
+        try:
+            lines.extend(p.read_text(errors="replace").splitlines())
+        except Exception:
+            pass
+    return lines
+
+
+def _f2b_today_ban_history() -> list:
+    """
+    Собирает все события "Ban" из лога Fail2ban за СЕГОДНЯ (по дате,
+    указанной в самой строке лога). Список естественным образом не
+    "затирается" новыми банами и сам сбрасывается с наступлением новых
+    суток — строки с прошлой датой просто не проходят фильтр, отдельный
+    state-файл и логика сброса не нужны.
+
+    ВАЖНО: функция только ЧИТАЕТ лог. Она не банит и не разбанивает —
+    реального состояния fail2ban (и тем более VLESS Reality/прочих служб)
+    это никак не касается. Даже если IP уже разбанен по истечении bantime,
+    он останется в этом списке как факт истории за сегодня.
+
+    Возвращает список dict {ip, jail, first_seen, last_seen, count},
+    отсортированный по last_seen (новые сверху).
+    """
+    today = time.strftime("%Y-%m-%d")
+    stats: dict = {}
+    for line in _f2b_log_lines():
+        m = _BAN_LINE_RE.match(line)
+        if not m or m.group("date") != today:
+            continue
+        key = (m.group("ip"), m.group("jail"))
+        ts = m.group("time")
+        e = stats.get(key)
+        if e is None:
+            stats[key] = {"ip": m.group("ip"), "jail": m.group("jail"),
+                          "first_seen": ts, "last_seen": ts, "count": 1}
+        else:
+            e["last_seen"] = ts
+            e["count"] += 1
+    return sorted(stats.values(), key=lambda e: e["last_seen"], reverse=True)
 
 
 def _f2b_ban(jail: str, ip: str) -> bool:
@@ -358,6 +422,7 @@ def do_manage_fail2ban() -> None:
             _box_item("6", "🔌 Включить/выключить джейл")
             _box_item("7", "📋 Лог Fail2ban (последние 30 строк)")
             _box_item("8", "🛠️  Восстановить базовую конфигурацию")
+            _box_item("9", "📊 История банов за сутки  (накопительно)")
         _box_row()
         _box_back()
         _box_bottom()
@@ -612,6 +677,28 @@ def do_manage_fail2ban() -> None:
             else:
                 _warn("Не удалось восстановить конфигурацию — "
                       "проверьте: journalctl -u fail2ban -n 20")
+            input(f"{BLUE}Нажмите Enter...{NC}")
+
+        # ── 9. История банов за сутки (накопительно, read-only) ──────────────────
+        elif ch == "9":
+            print()
+            hist = _f2b_today_ban_history()
+            _box_top(f"📊 История банов за сегодня ({len(hist)})")
+            _box_row(f"  {DIM}Список накопительный за текущие сутки — не зависит от{NC}")
+            _box_row(f"  {DIM}bantime: IP остаётся здесь, даже если уже разбанен по{NC}")
+            _box_row(f"  {DIM}истечении bantime. Сброс — автоматически с новых суток.{NC}")
+            _box_sep()
+            if not hist:
+                _box_row(f"  {DIM}За сегодня банов не было (или лог пуст/недоступен){NC}")
+            else:
+                _box_row(f"  {BOLD}{'#':<4}{'IP':<22}{'Джейл':<14}{'Раз':<5}{'Впервые':<10}Последний{NC}")
+                _box_sep()
+                for i, e in enumerate(hist, 1):
+                    _box_row(
+                        f"  {CYAN}{i:<4}{NC}{RED}{e['ip']:<22}{NC}{DIM}{e['jail']:<14}{NC}"
+                        f"{e['count']:<5}{DIM}{e['first_seen']:<10}{NC}{e['last_seen']}"
+                    )
+            _box_bottom()
             input(f"{BLUE}Нажмите Enter...{NC}")
 
         else:
