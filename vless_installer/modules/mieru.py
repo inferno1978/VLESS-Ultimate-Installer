@@ -549,7 +549,9 @@ def _ufw_is_active() -> bool:
     if not shutil.which("ufw"):
         return False
     r = _run(["ufw", "status"], capture=True)
-    return "active" in r.stdout.lower()
+    # ВАЖНО: "inactive" содержит подстроку "active" — поэтому проверяем
+    # именно "status: active", а не просто "active" в выводе.
+    return "status: active" in r.stdout.lower()
 
 def _ufw_open_port(proto: str, port_start: int, port_end: int) -> None:
     """Открывает порты через UFW если он активен."""

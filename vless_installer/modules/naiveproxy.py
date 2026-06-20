@@ -46,7 +46,7 @@ NaiveProxy — HTTPS forward proxy с Chromium fingerprint и probe resistance.
   • Генерирует Caddyfile с probe resistance и basicauth
   • Создаёт фейковый сайт (заглушка для зондов)
   • Создаёт systemd-сервис caddy-naive
-  • Открывает порт 443/tcp в iptables
+  • Открывает порт 443/tcp в UFW (если активен) или iptables
   • Управление пользователями: добавление, список, удаление
   • Каскад: настройка upstream для Entry→Exit схемы
   • Генерация naive+https:// ссылок и QR-кодов
@@ -531,6 +531,44 @@ def _ipt_persist() -> None:
         (rules_dir / "rules.v4").write_text(r.stdout)
 
 # ══════════════════════════════════════════════════════════════════════════════
+#  UFW
+# ══════════════════════════════════════════════════════════════════════════════
+def _ufw_is_active() -> bool:
+    """Проверяет активен ли UFW."""
+    if not shutil.which("ufw"):
+        return False
+    r = _run(["ufw", "status"], capture=True)
+    # "inactive" содержит подстроку "active" — проверяем "status: active".
+    return "status: active" in r.stdout.lower()
+
+def _ufw_open_tcp(port: int) -> None:
+    if not _ufw_is_active():
+        return
+    _run(["ufw", "allow", f"{port}/tcp", "comment", "NaiveProxy"], capture=True)
+
+def _ufw_close_tcp(port: int) -> None:
+    if not _ufw_is_active():
+        return
+    _run(["ufw", "delete", "allow", f"{port}/tcp"], capture=True)
+
+def _open_port(port: int) -> str:
+    """Открывает порт через UFW (если активен) или iptables. Возвращает описание."""
+    if _ufw_is_active():
+        _ufw_open_tcp(port)
+        return f"UFW: TCP {port} открыт."
+    _ipt_open_tcp(port)
+    _ipt_persist()
+    return f"iptables: TCP {port} открыт."
+
+def _close_port(port: int) -> None:
+    """Закрывает порт через UFW (если активен) или iptables."""
+    if _ufw_is_active():
+        _ufw_close_tcp(port)
+    else:
+        _ipt_close_tcp(port)
+        _ipt_persist()
+
+# ══════════════════════════════════════════════════════════════════════════════
 #  SYSTEMD
 # ══════════════════════════════════════════════════════════════════════════════
 def _install_service() -> None:
@@ -733,10 +771,9 @@ def _run_install_inner() -> None:
         _run(["systemctl", "start", "nginx"])
         print(f"  {GREEN}✓{NC}  nginx возвращён.")
 
-    # 6. iptables
-    _ipt_open_tcp(port)
-    _ipt_persist()
-    print(f"  {GREEN}✓{NC}  iptables: TCP {port} открыт.")
+    # 6. Firewall (UFW если активен, иначе iptables)
+    fw_msg = _open_port(port)
+    print(f"  {GREEN}✓{NC}  {fw_msg}")
 
     # 7. Сохраняем состояние
     _save_state({
@@ -1296,8 +1333,7 @@ def _full_uninstall(silent: bool = False) -> bool:
     for d in (_CFG_DIR, _FAKE_SITE_DIR, _LOG_DIR):
         if d.exists(): shutil.rmtree(d, ignore_errors=True)
 
-    _ipt_close_tcp(port)
-    _ipt_persist()
+    _close_port(port)
 
     try:
         if _MODULE_STATE.exists(): _MODULE_STATE.unlink()
