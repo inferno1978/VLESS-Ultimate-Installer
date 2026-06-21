@@ -214,6 +214,66 @@ def _box_kv(key: str, val: str, kw: int = 22) -> None:
     key_pad = kw - _wlen(key_colored)
     _box_row(f"  {key_colored}{' ' * max(0, key_pad)}  {val}")
 
+def _box_link(link: str, color: str = "") -> None:
+    """Выводит длинную ссылку внутри рамки, разбивая её на несколько строк
+    по '&' (безопасные точки разрыва), без сокращения/обрезания текста.
+    В отличие от _box_row(), никогда не добавляет '…' — вся ссылка видна
+    полностью, просто на нескольких строках."""
+    if not color:
+        color = YELLOW
+    max_w = _BOX_W - 4  # отступ "  " слева + запас на правую границу
+
+    tokens, buf = [], ""
+    for ch in link:
+        buf += ch
+        if ch == "&":
+            tokens.append(buf)
+            buf = ""
+    if buf:
+        tokens.append(buf)
+
+    lines, cur = [], ""
+    for tok in tokens:
+        if cur and _wlen(cur) + _wlen(tok) > max_w:
+            lines.append(cur)
+            cur = tok
+        else:
+            cur += tok
+        while _wlen(cur) > max_w:
+            acc, cut = 0, 0
+            for ch in cur:
+                import unicodedata as _ud
+                acc += 2 if _ud.east_asian_width(ch) in ('W', 'F') else 1
+                if acc > max_w:
+                    break
+                cut += 1
+            lines.append(cur[:cut])
+            cur = cur[cut:]
+    if cur:
+        lines.append(cur)
+
+    for line in lines:
+        _box_row(f"  {color}{line}{NC}")
+
+def _save_link_file(link: str, filename: str) -> Path:
+    """Сохраняет полную ссылку в файл в _CFG_DIR, чтобы её можно было
+    открыть и скопировать целиком, даже если терминал её обрезает."""
+    try:
+        _CFG_DIR.mkdir(parents=True, exist_ok=True)
+        path = _CFG_DIR / filename
+        path.write_text(link + "\n", encoding="utf-8")
+        try:
+            path.chmod(0o600)
+        except Exception:
+            pass
+        return path
+    except Exception:
+        return _CFG_DIR / filename
+
+def _print_link_file_path(path: Path) -> None:
+    print(f"  {DIM}📄 Полная ссылка сохранена в файл: {NC}{CYAN}{path}{NC}")
+    print(f"  {DIM}   (cat {path}  — чтобы скопировать целиком){NC}")
+
 # ══════════════════════════════════════════════════════════════════════════════
 #  ВСПОМОГАТЕЛЬНЫЕ
 # ══════════════════════════════════════════════════════════════════════════════
@@ -779,7 +839,7 @@ def _run_install_inner() -> None:
         f"&workers=16&port={_DEFAULT_TUN_PORT}"
         f"&pass={main_pass}"
     )
-    _box_row(f"  {YELLOW}{qwdtt_link}{NC}")
+    _box_link(qwdtt_link)
     _box_row()
     _box_warn("Замените ВК_ХЕШ_ЗВОНКА на хеш из ссылки vk.com/call/join/ХЕШ")
     _box_row()
@@ -789,6 +849,8 @@ def _run_install_inner() -> None:
     else:
         _box_info("Telegram-бот не настроен (можно добавить позже).")
     _box_bot()
+    link_path = _save_link_file(qwdtt_link, "qwdtt_link.txt")
+    _print_link_file_path(link_path)
     _pause()
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -957,11 +1019,13 @@ def _create_password() -> None:
         f"&workers=16&port={_DEFAULT_TUN_PORT}"
         f"&pass={new_pass}"
     )
-    _box_row(f"  {YELLOW}{link}{NC}")
+    _box_link(link)
     _box_row()
     if not vk_hash:
         _box_warn("Замените ВК_ХЕШ на хеш из ссылки vk.com/call/join/ХЕШ")
     _box_bot()
+    link_path = _save_link_file(link, f"link_{new_pass[:8]}.txt")
+    _print_link_file_path(link_path)
     _pause()
 
 def _show_password_link(passwords: dict, server_ip: str, dtls_port: int) -> None:
@@ -1001,11 +1065,13 @@ def _show_password_link(passwords: dict, server_ip: str, dtls_port: int) -> None
     print()
     _box_top("🔗  ССЫЛКА ДЛЯ КЛИЕНТА")
     _box_row()
-    _box_row(f"  {YELLOW}{link}{NC}")
+    _box_link(link)
     _box_row()
     if vk_hash == "ВК_ХЕШ":
         _box_warn("Хеш звонка не задан — замените ВК_ХЕШ вручную.")
     _box_bot()
+    link_path = _save_link_file(link, f"link_{pw[:8]}.txt")
+    _print_link_file_path(link_path)
     _pause()
 
 def _delete_password(passwords: dict) -> None:
