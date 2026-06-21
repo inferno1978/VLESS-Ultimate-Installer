@@ -7539,6 +7539,7 @@ def setup_fail2ban() -> None:
         [sshd]
         enabled = true
         port = 22
+        backend = systemd
         logpath = %(sshd_log)s
         maxretry = 5
         bantime = 3600
