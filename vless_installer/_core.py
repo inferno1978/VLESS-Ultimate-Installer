@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
-# === v4.12.9 ===
+# === v4.12.10 ===
 """
-VLESS + TCP + REALITY + xHTTP TLS — Ultimate Installer v4.12.9
+VLESS + TCP + REALITY + xHTTP TLS — Ultimate Installer v4.12.10
 Python 3.12+ port
 
 Поддержка: Ubuntu 20.04/22.04/24.04, Debian 11/12/13
@@ -235,7 +235,7 @@ def die(msg: str) -> None:
     sys.exit(1)
 
 
-log_to_file("INFO", "=== Запуск VLESS Ultimate Installer v4.12.9 ===")
+log_to_file("INFO", "=== Запуск VLESS Ultimate Installer v4.12.10 ===")
 log_to_file("INFO", f"Время начала: {datetime.now()}")
 
 # =============================================================================
@@ -262,7 +262,7 @@ def _make_banner(show_ram_warning: bool = True) -> str:
         "  ╚═══╝  ╚══════╝╚══════╝╚══════╝╚══════╝",
     ]
     _info_lines = [
-        "VLESS REALITY + xHTTP TLS INSTALLER v4.12.9",
+        "VLESS REALITY + xHTTP TLS INSTALLER v4.12.10",
         "IPv6 DualStack | 6 Templates | SHA256 Verify",
         "Balancer: RoundRobin | LeastPing | LeastLoad",
         "Dashboard | FP Rotate | GeoCheck | Multi-User",
@@ -5936,7 +5936,7 @@ def install_dnscrypt() -> None:
         'server_names = ["cloudflare", "google"]'
     )
     DNSCRYPT_CONF.write_text(textwrap.dedent(f"""\
-        ## dnscrypt-proxy.toml — сгенерирован VLESS Ultimate Installer v4.12.9
+        ## dnscrypt-proxy.toml — сгенерирован VLESS Ultimate Installer v4.12.10
         ## Слушает на {DNSCRYPT_LISTEN_ADDR}:{DNSCRYPT_LISTEN_PORT}
 
         listen_addresses = ['{DNSCRYPT_LISTEN_ADDR}:{DNSCRYPT_LISTEN_PORT}']
@@ -24438,7 +24438,7 @@ def _fetch_prefixes_for_asn(asn: str) -> list:
         for attempt in range(1, 4):   # до 3 попыток на каждый URL
             try:
                 req = urllib.request.Request(url, headers={
-                    "User-Agent": "xray-installer/4.12.9",
+                    "User-Agent": "xray-installer/4.12.10",
                     "Accept":     "application/json",
                 })
                 with urllib.request.urlopen(req, timeout=30) as resp:
@@ -29731,7 +29731,7 @@ def main_menu() -> None:
             _BOX_W_saved = _BOX_W
             _BOX_W = 64
             _box_top()
-            _box_row(f"  {BOLD}{TITLE}VLESS Ultimate Installer v4.12.9{NC}  {DIM}│{NC}  {mode_str}")
+            _box_row(f"  {BOLD}{TITLE}VLESS Ultimate Installer v4.12.10{NC}  {DIM}│{NC}  {mode_str}")
             _box_sep()
             _box_row()
             _box_row(f"  {CYAN}1{NC}  ⚙️  {TITLE}Установка и Система{NC}")

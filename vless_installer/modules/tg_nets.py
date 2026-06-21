@@ -176,7 +176,7 @@ HTTP_TIMEOUT = 20
 
 TG_ASNS      = [62041, 59930, 44907, 211157, 42065, 62014]
 TG_MNT       = "MNT-TELEGRAM"
-_UA          = "VLESS-Ultimate-Installer/4.12.9 (telemt-tg-nets)"
+_UA          = "VLESS-Ultimate-Installer/4.12.10 (telemt-tg-nets)"
 
 # ══════════════════════════════════════════════════════════════════════════════
 #  ВСТРОЕННЫЙ FALLBACK (если все 4 источника недоступны)

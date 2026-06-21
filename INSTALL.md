@@ -1,4 +1,4 @@
-# Инструкция по установке — VLESS Ultimate Installer v4.12.9
+# Инструкция по установке — VLESS Ultimate Installer v4.12.10
 
 ## Быстрый старт (рекомендуется)
 

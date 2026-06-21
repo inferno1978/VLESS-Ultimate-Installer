@@ -2,7 +2,29 @@
 
 ---
 
-## 📹 Новый протокол olcRTC (Beta) — 21 июня 2026
+## 🐛 v4.12.10 — 21 июня 2026 — Fail2ban sshd-jail и лог UFW
+
+### Исправлено
+
+**`setup_fail2ban()` — джейл `[sshd]` падал с `Have not found any log file for sshd jail`**
+
+На серверах без rsyslog (только journald, без файла `/var/log/auth.log`)
+fail2ban с дефолтным `backend = auto` не находил физический лог-файл для
+джейла `sshd` (`%(sshd_log)s`) и не запускался вовсе. Добавлен явный
+`backend = systemd` для джейла `[sshd]` — fail2ban читает события sshd
+прямо из journald независимо от наличия rsyslog/auth.log.
+
+**`configure_firewall()` — rsyslog уходил в suspended/resumed после `ufw enable`**
+
+После включения UFW и появления первых строк в `/var/log/ufw.log`
+rsyslog (работает от `syslog:adm`) не мог создать этот файл сам — каталог
+`/var/log` имеет права `755 root:syslog` без `w` для группы. Теперь перед
+`ufw --force enable` файл `/var/log/ufw.log` создаётся заранее с
+владельцем `syslog:adm` и правами `640`.
+
+---
+
+
 
 ### Добавлено
 
