@@ -582,12 +582,12 @@ def _install_service(dtls_port: int, wg_port: int, main_pass: str,
         "[Service]\n"
         "Type=simple\n"
         f"ExecStart={_BIN_PATH} "
-        f"-dir {_CFG_DIR} "
-        f"-pass {main_pass} "
-        f"-dtls :{dtls_port} "
-        f"-wg :{wg_port} "
+        f"-config-dir {_CFG_DIR} "
+        f"-password {main_pass} "
+        f"-listen 0.0.0.0:{dtls_port} "
+        f"-wg-port {wg_port} "
         + (f"-admin {admin_id} " if admin_id else "")
-        + (f"-bot {bot_token} " if bot_token else "")
+        + (f"-bot-token {bot_token} " if bot_token else "")
         + "\n"
         "Restart=always\n"
         "RestartSec=5\n"
