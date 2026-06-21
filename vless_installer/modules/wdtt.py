@@ -343,36 +343,108 @@ def _hot_reload() -> bool:
 #  СБОРКА / УСТАНОВКА БИНАРНИКА
 # ══════════════════════════════════════════════════════════════════════════════
 def _check_go() -> Optional[str]:
-    """Возвращает путь к go или None."""
-    go = shutil.which("go")
+    """Возвращает путь к go (предпочитая /usr/local/bin/go) или None."""
+    go = "/usr/local/bin/go" if Path("/usr/local/bin/go").exists() else shutil.which("go")
     if go:
         r = _run([go, "version"], capture=True)
         if r.returncode == 0:
             return go
     return None
 
-def _install_go() -> bool:
-    """Устанавливает Go через apt если его нет."""
-    print(f"  {CYAN}→{NC}  Устанавливаю Go через apt...")
-    r = _run(["apt-get", "install", "-y", "golang-go"], capture=True)
-    return r.returncode == 0
+def _go_arch() -> str:
+    r = _run(["uname", "-m"], capture=True)
+    m = (r.stdout or "").strip() if r.returncode == 0 else ""
+    return {"x86_64": "amd64", "aarch64": "arm64", "arm64": "arm64"}.get(m, "amd64")
+
+def _ver_tuple(s: str) -> tuple:
+    parts = re.findall(r"\d+", s)[:3]
+    parts += ["0"] * (3 - len(parts))
+    return tuple(int(p) for p in parts)
+
+def _go_installed_version(go: str) -> Optional[tuple]:
+    r = _run([go, "version"], capture=True)
+    if r.returncode != 0:
+        return None
+    m = re.search(r"go(\d+\.\d+(?:\.\d+)?)", r.stdout or "")
+    return _ver_tuple(m.group(1)) if m else None
+
+def _go_required_version(gomod: Path) -> str:
+    """Версия Go, требуемая go.mod исходников qWDTT (директива 'go X.Y.Z')."""
+    if gomod.exists():
+        try:
+            m = re.search(r"^go\s+(\d+\.\d+(?:\.\d+)?)", gomod.read_text(), re.M)
+            if m:
+                return m.group(1)
+        except Exception:
+            pass
+    return "1.21.0"
+
+def _http_download(url: str, dest: Path, timeout: int = 180) -> bool:
+    try:
+        with urllib.request.urlopen(url, timeout=timeout) as resp, dest.open("wb") as f:
+            shutil.copyfileobj(resp, f)
+        return dest.exists() and dest.stat().st_size > 0
+    except Exception:
+        return False
+
+def _install_go_toolchain(required: str) -> Optional[str]:
+    """
+    Скачивает официальный архив Go с go.dev в /usr/local/go и линкует
+    /usr/local/bin/go — apt в большинстве дистрибутивов даёт версию Go
+    старше, чем требуют современные go.mod (см. golang-go в Ubuntu).
+    """
+    arch = _go_arch()
+    try:
+        with urllib.request.urlopen("https://go.dev/VERSION?m=text", timeout=15) as resp:
+            version = resp.read().decode("utf-8", errors="replace").splitlines()[0].strip()
+        if not version.startswith("go"):
+            version = f"go{required}"
+    except Exception:
+        version = f"go{required}"
+
+    url = f"https://go.dev/dl/{version}.linux-{arch}.tar.gz"
+    tarball = Path(f"/tmp/{version}.linux-{arch}.tar.gz")
+    print(f"  {CYAN}→{NC}  Скачиваю {version} ({arch})...")
+    if not _http_download(url, tarball):
+        print(f"  {RED}✗{NC}  Не удалось скачать {url}")
+        return None
+
+    go_dir = Path("/usr/local/go")
+    if go_dir.exists():
+        _run(["rm", "-rf", str(go_dir)])
+    r = _run(["tar", "-C", "/usr/local", "-xzf", str(tarball)])
+    tarball.unlink(missing_ok=True)
+    if r.returncode != 0:
+        print(f"  {RED}✗{NC}  Не удалось распаковать архив Go.")
+        return None
+
+    for exe in ("go", "gofmt"):
+        src = go_dir / "bin" / exe
+        dst = Path("/usr/local/bin") / exe
+        if src.exists():
+            try:
+                if dst.exists() or dst.is_symlink():
+                    dst.unlink()
+                dst.symlink_to(src)
+            except Exception:
+                pass
+
+    return _check_go()
+
+def _ensure_go(required: str) -> Optional[str]:
+    """Возвращает путь к go, удовлетворяющему required, ставя свежий Go при необходимости."""
+    go = _check_go()
+    if go and _go_installed_version(go) and _go_installed_version(go) >= _ver_tuple(required):
+        return go
+    print(f"  {CYAN}→{NC}  Нужен Go {required}+"
+          f"{' (текущий старее)' if go else ' (не найден)'}, устанавливаю...")
+    return _install_go_toolchain(required)
 
 def _build_wdtt_server() -> bool:
     """
     Скачивает исходники qWDTT и собирает wdtt-server.
     Бинарник помещается в /usr/local/bin/wdtt-server.
     """
-    go = _check_go()
-    if not go:
-        print(f"  {CYAN}→{NC}  Go не найден, устанавливаю...")
-        if not _install_go():
-            print(f"  {RED}✗{NC}  Не удалось установить Go.")
-            return False
-        go = _check_go()
-        if not go:
-            print(f"  {RED}✗{NC}  Go всё ещё не найден.")
-            return False
-
     tmp = Path(tempfile.mkdtemp())
     try:
         archive = tmp / "master.tar.gz"
@@ -389,36 +461,32 @@ def _build_wdtt_server() -> bool:
             return False
         src_dir = src_dirs[0]
 
+        # go.mod исходников требует конкретную версию Go (например 1.25.0) —
+        # ставим официальный тулчейн с go.dev под эту версию, чтобы не зависеть
+        # от устаревшего пакета golang-go из apt и от GOTOOLCHAIN-автодокачки.
+        required = _go_required_version(src_dir / "go.mod")
+        go = _ensure_go(required)
+        if not go:
+            print(f"  {RED}✗{NC}  Не удалось установить подходящий Go ({required}+).")
+            return False
+
         # Исходники qWDTT содержат go.mod, но НЕ содержат go.sum.
         # При -mod=readonly (по умолчанию с Go 1.16+) это даёт ошибку
         # "missing go.sum entry" — поэтому сначала достраиваем go.sum.
-        #
-        # go.mod может требовать go-версию новее установленной (например
-        # "go 1.25.0" при локальном 1.22-1.24). Штатное поведение Go
-        # (GOTOOLCHAIN=auto) — самому скачать и проверить нужный тулчейн
-        # через checksum database, это просто работает при наличии сети.
-        # Принудительный офлайн-режим (GOSUMDB=off + GOTOOLCHAIN=local)
-        # помогает только если локальный Go уже не старее требуемого —
-        # поэтому это запасной путь, а не основной.
         print(f"  {CYAN}→{NC}  Разрешаю зависимости Go-модуля...")
-        default_env = dict(os.environ)
-        offline_env = {**os.environ, "GOSUMDB": "off", "GOTOOLCHAIN": "local"}
-
-        r = _run([go, "mod", "tidy"], capture=True, env=default_env, cwd=str(src_dir))
-        tidy_env = default_env
+        r = _run([go, "mod", "tidy"], capture=True, env=dict(os.environ), cwd=str(src_dir))
         if r.returncode != 0:
+            # Запасной путь — на серверах без доступа к sumdb/proxy.
+            offline_env = {**os.environ, "GOSUMDB": "off"}
             r2 = _run([go, "mod", "tidy"], capture=True, env=offline_env, cwd=str(src_dir))
-            if r2.returncode == 0:
-                tidy_env = offline_env
-            else:
+            if r2.returncode != 0:
                 print(f"  {RED}✗{NC}  Не удалось разрешить зависимости Go (go mod tidy):")
                 print(f"  {DIM}{(r.stderr or r.stdout or '')[:500]}{NC}")
-                print(f"  {DIM}Нужен доступ к proxy.golang.org, либо локальный Go "
-                      f"не старее версии, указанной в go.mod исходников.{NC}")
+                print(f"  {DIM}Проверьте доступ к proxy.golang.org с этого сервера.{NC}")
                 return False
 
         print(f"  {CYAN}→{NC}  Компилирую wdtt-server (это займёт ~1-2 минуты)...")
-        env = {**tidy_env, "CGO_ENABLED": "0", "GOOS": "linux", "GOARCH": "amd64"}
+        env = {**os.environ, "CGO_ENABLED": "0", "GOOS": "linux", "GOARCH": "amd64"}
         r = _run(
             [go, "build", "-o", str(tmp / "wdtt-server"),
              "-ldflags", "-s -w", "./server.go"],
