@@ -671,11 +671,17 @@ def _flow_link_detail(st: dict, name: str) -> None:
             print()
             client_text = _client_yaml(link["carrier"], link["room_id"], link["key"],
                                         link["transport"], link["socks_port"])
+            client_yaml_path = OLC_LINKS_DIR / f"{name}.client.yaml"
+            try:
+                OLC_LINKS_DIR.mkdir(parents=True, exist_ok=True)
+                client_yaml_path.write_text(client_text, encoding="utf-8")
+            except Exception as e:
+                _warn(f"Не удалось записать клиентский конфиг: {e}")
             _box_top(f"Конфиг клиента «{name}»")
             for line in client_text.splitlines():
                 _box_row(f"  {DIM}{line}{NC}")
             _box_sep()
-            _box_row(f"  {DIM}Файл на сервере: {NC}{CYAN}{OLC_LINKS_DIR / f'{name}.client.yaml'}{NC}")
+            _box_row(f"  {DIM}Файл на сервере: {NC}{CYAN}{client_yaml_path}{NC}")
             _box_bottom()
             input(f"{BLUE}Нажмите Enter...{NC}")
         elif ch == "5":
