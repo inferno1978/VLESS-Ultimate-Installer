@@ -1048,6 +1048,7 @@ Type=simple
 User=root
 WorkingDirectory=/var/lib/telemt
 ExecStart=/usr/local/bin/telemt /etc/telemt/telemt.toml
+ExecReload=/bin/kill -HUP $MAINPID
 Restart=on-failure
 RestartSec=10
 TimeoutStartSec=90
@@ -2156,8 +2157,13 @@ def mtproto_menu() -> None:
                     _info("Переключаю в Direct Mode (runtime)...")
                     ok_p = _fb_mod._patch_config_middle_proxy(CONFIG_FILE, enable=False)
                     if ok_p:
-                        _fb_mod._reload_telemt(SERVICE_NAME)
-                        _ok("Переключено в Direct Mode. use_middle_proxy=false в конфиге.")
+                        applied, method = _fb_mod.apply_telemt_reload(SERVICE_NAME)
+                        if applied:
+                            how = "reload (SIGHUP)" if method == "reload" else "restart"
+                            _ok(f"Переключено в Direct Mode. use_middle_proxy=false в конфиге, применено через {how}.")
+                        else:
+                            _err("Конфиг обновлён (use_middle_proxy=false), но telemt НЕ применил изменения "
+                                 "(не сработали ни reload, ни restart). Проверьте: systemctl status telemt")
                     else:
                         _err("Не удалось обновить конфиг.")
                     _pause()
@@ -2166,8 +2172,13 @@ def mtproto_menu() -> None:
                     _info("Переключаю в Middle Proxy (runtime)...")
                     ok_p = _fb_mod._patch_config_middle_proxy(CONFIG_FILE, enable=True)
                     if ok_p:
-                        _fb_mod._reload_telemt(SERVICE_NAME)
-                        _ok("Переключено в Middle Proxy. use_middle_proxy=true в конфиге.")
+                        applied, method = _fb_mod.apply_telemt_reload(SERVICE_NAME)
+                        if applied:
+                            how = "reload (SIGHUP)" if method == "reload" else "restart"
+                            _ok(f"Переключено в Middle Proxy. use_middle_proxy=true в конфиге, применено через {how}.")
+                        else:
+                            _err("Конфиг обновлён (use_middle_proxy=true), но telemt НЕ применил изменения "
+                                 "(не сработали ни reload, ни restart). Проверьте: systemctl status telemt")
                     else:
                         _err("Не удалось обновить конфиг.")
                     _pause()

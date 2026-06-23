@@ -521,6 +521,49 @@ def _restart_telemt(service: str = _SERVICE_NAME) -> bool:
         return False
 
 
+def apply_telemt_reload(service: str = _SERVICE_NAME) -> tuple[bool, str]:
+    """
+    Применяет уже записанный на диск telemt.toml к запущенному процессу.
+
+    Баг, который эта функция исправляет:
+      `_reload_telemt()` (systemctl reload) у юнитов telemt.service,
+      созданных без `ExecReload=` (а такие уже стоят на проде — старые
+      установки), всегда завершается ошибкой ("Job type reload is not
+      applicable for unit telemt.service"). Раньше это игнорировалось
+      вызывающей стороной: конфиг на диске менялся корректно, но
+      запущенный процесс об этом не узнавал, и ручное переключение
+      Direct ↔ Middle в меню "F" визуально показывало успех, хотя
+      реального переключения не происходило.
+
+    Эта функция:
+      1. Пробует мягкий reload (SIGHUP) через _reload_telemt().
+      2. Если reload не сработал — откатывается на полный restart
+         через _restart_telemt(). Полный restart всегда подхватывает
+         актуальный telemt.toml с диска, независимо от того, объявлен
+         ли ExecReload в юните.
+      3. Возвращает (success, method), чтобы вызывающий код мог
+         показать пользователю правду о том, что произошло.
+
+    Используется как для Direct → Middle, так и для Middle → Direct —
+    логика симметрична для обоих направлений.
+    """
+    if _reload_telemt(service):
+        _log_fb("Конфиг применён через systemctl reload (SIGHUP).", "OK")
+        return True, "reload"
+
+    _log_fb(
+        "systemctl reload не сработал (вероятно, юнит создан без "
+        "ExecReload) — пробую полный restart.",
+        "WARN",
+    )
+    if _restart_telemt(service):
+        _log_fb("Конфиг применён через systemctl restart.", "OK")
+        return True, "restart"
+
+    _log_fb("Не удалось применить конфиг ни через reload, ни через restart.", "ERROR")
+    return False, "none"
+
+
 # ══════════════════════════════════════════════════════════════════════════════
 #  ОРКЕСТРАТОР FALLBACK
 # ══════════════════════════════════════════════════════════════════════════════
