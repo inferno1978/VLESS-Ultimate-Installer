@@ -125,6 +125,15 @@ def _get_syn_limiter_module():
     except ImportError:
         return None
 
+# iOS-фикс: MSS-clamp + redirect на отдельный порт (telemt_ios_fix.py)
+def _get_ios_fix_module():
+    """Lazy-import telemt_ios_fix — изолирует ошибки импорта."""
+    try:
+        from vless_installer.modules import telemt_ios_fix as _if_mod
+        return _if_mod
+    except ImportError:
+        return None
+
 def _TG_NETS_current() -> list:
     """Возвращает актуальный список подсетей TG (файл → встроенный)."""
     return _get_tg_nets()
@@ -1082,6 +1091,13 @@ def _apply_optimizations() -> None:
         pass
     cc = ("net.ipv4.tcp_congestion_control = bbr\nnet.core.default_qdisc = fq"
           if bbr else "net.ipv4.tcp_congestion_control = cubic")
+    # keepalive_time/intvl/probes занижены против дефолта (7200/75/9).
+    # Контекст: iOS (и часть агрессивных Android-прошивок) сворачивает/душит
+    # приложение без чистого закрытия сокета — сервер держит мёртвое
+    # соединение часами. При возврате клиент пытается переподключиться и
+    # залипает, пока старая половинка соединения не истечёт. 60/15/3 рвёт
+    # мёртвый коннект за ~105 сек (60с тишины + проба каждые 15с × 3 попытки
+    # → RST) вместо дефолтных ~2.1ч.
     OPTIMIZER_CONF.parent.mkdir(parents=True, exist_ok=True)
     OPTIMIZER_CONF.write_text(f"""# Telemt MTProxy — kernel optimizations
 {cc}
@@ -1091,7 +1107,9 @@ net.core.netdev_max_backlog = 250000
 net.netfilter.nf_conntrack_max = {conntrack}
 net.ipv4.tcp_tw_reuse = 1
 net.ipv4.tcp_fin_timeout = 30
-net.ipv4.tcp_keepalive_time = 600
+net.ipv4.tcp_keepalive_time = 60
+net.ipv4.tcp_keepalive_intvl = 15
+net.ipv4.tcp_keepalive_probes = 3
 net.ipv4.ip_local_port_range = 1024 65535
 net.core.rmem_max = 134217728
 net.core.wmem_max = 134217728
@@ -1358,11 +1376,16 @@ def _menu_users(server_ip: str) -> None:
             if not domain or not server_ip:
                 _warn("Нет данных. Выполните установку.")
             else:
+                _if_mod = _get_ios_fix_module()
+                _ios_st = _if_mod.status() if _if_mod is not None else {"enabled": False}
                 for n, s in users.items():
                     sec  = _make_tls_secret(s, domain)
                     link = f"tg://proxy?server={server_ip}&port={port}&secret={sec}"
                     print(f"  {BOLD}{n}:{NC}")
                     print(f"  {YELLOW}{link}{NC}")
+                    if _ios_st.get("enabled"):
+                        ios_link = f"tg://proxy?server={server_ip}&port={_ios_st['ext_port']}&secret={sec}"
+                        print(f"  {DIM}└─ iOS:{NC} {CYAN}{ios_link}{NC}")
                     print()
             _pause()
 
@@ -1715,11 +1738,16 @@ def _run_install_inner(server_ip: str, server_ipv6: str) -> None:
     print()
     print(f"  {BOLD}{CYAN}🔗 Ссылки для Telegram:{NC}")
     print()
+    _if_mod = _get_ios_fix_module()
+    _ios_st = _if_mod.status() if _if_mod is not None else {"enabled": False}
     for n, s in users.items():
         sec  = _make_tls_secret(s, tls_domain)
         link = f"tg://proxy?server={server_ip}&port={port}&secret={sec}"
         print(f"  {BOLD}{WHITE}{n}:{NC}")
         print(f"  {YELLOW}{link}{NC}")
+        if _ios_st.get("enabled"):
+            ios_link = f"tg://proxy?server={server_ip}&port={_ios_st['ext_port']}&secret={sec}"
+            print(f"  {DIM}└─ iOS:{NC} {CYAN}{ios_link}{NC}")
         print()
     _pause()
 
@@ -1942,6 +1970,11 @@ def mtproto_menu() -> None:
         if _sl_mod_for_status is not None and CONFIG_FILE.exists():
             _box_kv("SYN-limiter:", _sl_mod_for_status.syn_limiter_status_line())
 
+        # Статус iOS-фикса одной строкой
+        _if_mod_for_status = _get_ios_fix_module()
+        if _if_mod_for_status is not None and CONFIG_FILE.exists():
+            _box_kv("iOS-фикс:", _if_mod_for_status.ios_fix_status_line())
+
         _box_row(); _box_sep()
         _box_item("1", "🚀  Установить / переустановить")
         _box_item("2", "👥  Управление пользователями")
@@ -1953,6 +1986,7 @@ def mtproto_menu() -> None:
         _box_item("X", "🔗  Xray-интеграция (SOCKS5 ↔ каскад)")
         _box_item("F", "🔀  Hybrid Fallback (Middle Proxy → Direct)")
         _box_item("S", "🛡️   SYN-limiter (стабилизация подключения)")
+        _box_item("I", "🍎  iOS-фикс (MSS + отдельный порт)")
         _box_item("N", "🌐  Обновить подсети Telegram (RIPE NCC)")
         _box_item("8", f"{RED}🗑️   Полное удаление{NC}")
         _box_sep()
@@ -1985,12 +2019,17 @@ def mtproto_menu() -> None:
             users  = _load_users()
             port   = _get_port()
             domain = _get_domain()
+            _if_mod = _get_ios_fix_module()
+            _ios_st = _if_mod.status() if _if_mod is not None else {"enabled": False}
             print()
             for n, s in users.items():
                 sec  = _make_tls_secret(s, domain)
                 link = f"tg://proxy?server={server_ip}&port={port}&secret={sec}"
                 print(f"  {BOLD}{n}:{NC}")
                 print(f"  {YELLOW}{link}{NC}")
+                if _ios_st.get("enabled"):
+                    ios_link = f"tg://proxy?server={server_ip}&port={_ios_st['ext_port']}&secret={sec}"
+                    print(f"  {DIM}└─ iOS:{NC} {CYAN}{ios_link}{NC}")
                 print()
             _pause()
 
@@ -2149,6 +2188,20 @@ def mtproto_menu() -> None:
                 pass
             except Exception as _se:
                 _err(f"Ошибка меню SYN-limiter: {_se}"); _pause()
+
+        elif ch == "i":
+            # ── iOS-фикс управление ────────────────────────────────────────────
+            if not CONFIG_FILE.exists():
+                _warn("Telemt не установлен."); _pause(); continue
+            _if_mod = _get_ios_fix_module()
+            if _if_mod is None:
+                _warn("Модуль telemt_ios_fix недоступен."); _pause(); continue
+            try:
+                _if_mod.ios_fix_menu()
+            except _Cancelled:
+                pass
+            except Exception as _ie:
+                _err(f"Ошибка меню iOS-фикса: {_ie}"); _pause()
 
         elif ch == "n":
             # ── Обновление подсетей Telegram ──────────────────────────────
