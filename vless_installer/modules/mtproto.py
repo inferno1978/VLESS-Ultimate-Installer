@@ -2128,7 +2128,10 @@ def mtproto_menu() -> None:
                 elif fb_ch == "2":
                     print()
                     _info("Проверяю ME-серверы...")
-                    probe = _fb_mod.MiddleProxyProbe()
+                    live = _fb_mod.fetch_live_me_endpoints()
+                    src  = f"живой пул getProxyConfig ({len(live)} адресов)" if live else "статический fallback-список (getProxyConfig недоступен)"
+                    _info(f"источник: {src}")
+                    probe = _fb_mod.MiddleProxyProbe(live or _fb_mod._ME_ENDPOINTS)
                     ok_c, total_c = probe.probe_all()
                     ratio = ok_c / total_c if total_c else 0
                     if ratio >= _fb_mod._ME_QUORUM:

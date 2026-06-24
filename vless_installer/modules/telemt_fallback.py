@@ -47,6 +47,7 @@ import socket
 import subprocess
 import sys
 import time
+import urllib.request
 from dataclasses import dataclass, field
 from pathlib import Path
 from threading import Event, Thread
@@ -80,9 +81,17 @@ RED, GREEN, YELLOW, CYAN, BOLD, DIM, WHITE, NC = (
 #  КОНСТАНТЫ
 # ══════════════════════════════════════════════════════════════════════════════
 
-# Известные ME-серверы Telegram (Middle proxy endpoints).
-# Список взят из публичной документации и не меняется между релизами Telemt.
-# DC1..DC5 — стандартные номера датацентров Telegram.
+# Статический fallback-список — используется ТОЛЬКО если живой fetch
+# через fetch_live_me_endpoints() не удался (нет сети до Telegram).
+#
+# ВАЖНО: это адреса DC API Telegram (149.154.x.x:443/8443) — те же,
+# что прописываются в [dc_overrides] для Direct Mode. Это НЕ настоящий
+# пул ME middle-proxy серверов (тот живёт на :8888 и состоит из совсем
+# других IP, см. fetch_live_me_endpoints). Проверка по этому списку
+# может дать ложноположительный результат («ME доступны»), когда
+# реальный ME-пул на 8888 при этом недоступен. Список оставлен только
+# как последний рубеж, если getProxyConfig недоступен (например, сам
+# core.telegram.org заблокирован в регионе).
 _ME_ENDPOINTS: list[tuple[str, int]] = [
     # DC1
     ("149.154.175.50",  443),
@@ -101,6 +110,14 @@ _ME_ENDPOINTS: list[tuple[str, int]] = [
     ("91.108.4.100",   8443),
 ]
 
+# Официальный источник актуального пула ME-серверов (proxy-multi.conf).
+# Тот же файл скачивает себе любой оператор MTProxy при старте, и судя
+# по адресам в журнале telemt (91.108.x.x, 149.154.164.x на :8888,
+# которых нет ни в _ME_ENDPOINTS, ни в [dc_overrides]) — сам telemt
+# берёт пул из этого же или аналогичного источника.
+_PROXY_CONFIG_URL     = "https://core.telegram.org/getProxyConfig"
+_PROXY_CONFIG_TIMEOUT = 5.0
+
 # Минимальная доля успешных ME-проб для признания пула «готовым»
 _ME_QUORUM = 0.34   # ≥1/3 активных DC достаточно для работы Middle Proxy
 
@@ -115,6 +132,70 @@ _ME_FAILURE_PATTERNS: list[str] = [
     "Failed to connect to ME",
     "ME pool exhausted",
 ]
+
+
+def fetch_live_me_endpoints(
+    url: str = _PROXY_CONFIG_URL,
+    timeout: float = _PROXY_CONFIG_TIMEOUT,
+) -> list[tuple[str, int]]:
+    """
+    Скачивает актуальный пул ME middle-proxy серверов с официального
+    Telegram endpoint (proxy-multi.conf). Формат строк внутри файла:
+
+        proxy_for 4 91.108.4.219:8888;
+
+    Номер DC может быть отрицательным (медиа-датацентр) — это не важно
+    для пробы доступности, поэтому номер игнорируется, берётся только
+    host:port.
+
+    Возвращает список (host, port), без дублей, в порядке появления.
+    При любой ошибке (нет сети, таймаут, Telegram сам заблокирован
+    в регионе) — возвращает пустой список. Вызывающий код обязан
+    в этом случае откатиться на статический _ME_ENDPOINTS.
+    """
+    try:
+        req = urllib.request.Request(
+            url, headers={"User-Agent": "vless-ultimate-installer/telemt-fallback"}
+        )
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            text = resp.read().decode("utf-8", errors="replace")
+    except Exception:
+        return []
+
+    endpoints: list[tuple[str, int]] = []
+    seen: set[tuple[str, int]] = set()
+    for m in re.finditer(r'proxy_for\s+-?\d+\s+([\d.]+):(\d+)\s*;', text):
+        host = m.group(1)
+        try:
+            port = int(m.group(2))
+        except ValueError:
+            continue
+        pair = (host, port)
+        if pair not in seen:
+            seen.add(pair)
+            endpoints.append(pair)
+    return endpoints
+
+
+def _diagnostic_probe(
+    tcp_timeout: float = _PROBE_TCP_TIMEOUT,
+    quorum: float = _ME_QUORUM,
+) -> "MiddleProxyProbe":
+    """
+    Строит MiddleProxyProbe для РУЧНЫХ диагностических проверок
+    (меню «Проверить ME-серверы сейчас» и `--probe`).
+
+    В отличие от MiddleProxyProbe() с дефолтными аргументами — пробует
+    сначала живой пул через fetch_live_me_endpoints(), и только при
+    неудаче откатывается на статический _ME_ENDPOINTS.
+
+    Намеренно НЕ меняет дефолтное поведение самого MiddleProxyProbe():
+    автоматический FallbackOrchestrator (run_with_fallback) и юнит-тесты
+    модуля продолжают использовать статический список без сетевого
+    запроса — это сохраняет их детерминированность и offline-безопасность.
+    """
+    live = fetch_live_me_endpoints()
+    return MiddleProxyProbe(live or _ME_ENDPOINTS, tcp_timeout, quorum)
 
 # ══════════════════════════════════════════════════════════════════════════════
 #  DATACLASS: FallbackConfig
@@ -1057,7 +1138,10 @@ def me_probe_menu(config_file: Path = _CONFIG_FILE) -> FallbackConfig:
     elif ch == "t":
         print()
         print(f"  {CYAN}→{NC}  Проверяю доступность ME-серверов Telegram...")
-        probe = MiddleProxyProbe()
+        live = fetch_live_me_endpoints()
+        src  = f"живой пул getProxyConfig ({len(live)} адресов)" if live else "статический fallback-список (getProxyConfig недоступен)"
+        print(f"  {DIM}источник: {src}{NC}")
+        probe = MiddleProxyProbe(live or _ME_ENDPOINTS)
         ok, total = probe.probe_all()
         ratio = ok / total if total else 0
         if ratio >= _ME_QUORUM:
@@ -1273,7 +1357,7 @@ if __name__ == "__main__":
     if "--test" in sys.argv:
         _run_unit_tests()
     elif "--probe" in sys.argv:
-        probe = MiddleProxyProbe()
+        probe = _diagnostic_probe()
         print(probe.summary())
     elif "--status" in sys.argv:
         print(fallback_status_line())
