@@ -141,6 +141,9 @@ from vless_installer.modules.hysteria2_menu      import do_hysteria2_menu
 from vless_installer.modules.config_backup       import backup_xray_config, do_backup_menu
 from vless_installer.modules.cold_boot_restore   import do_cold_boot_menu
 from vless_installer.modules.node_health_monitor import do_health_monitor_menu
+# ── Новые модули (DPI-цензура снаружи + бенчмарк сервера) ────────────────────
+from vless_installer.modules.dpi_censor_check    import do_dpi_censor_check_menu
+from vless_installer.modules.network_bench       import do_network_bench_menu
 # ─────────────────────────────────────────────────────────────────────────────
 
 
@@ -29100,6 +29103,7 @@ def _menu_diagnostics() -> None:
         _box_item("7", f"🩺 Ежедневный Health-отчёт  {DIM}(cron 08:00){NC}")
         _box_item("8", "🩺 Полная диагностика одной кнопкой")
         _box_item("9", f"💻 Системный дашборд  {DIM}(CPU / RAM / Disk){NC}")
+        _box_item("NB", f"🚀 Бенчмарк сервера  {DIM}(CPU/RAM/Disk + iperf3 RU/EU/NA/APAC){NC}")
         _box_sep()
         _box_item("M", f"🗺️   Матрица exit-нод / туннель{_matrix_note}")
         _box_item("B", f"🔌 Проверка порта снаружи  {DIM}(заблокирован ли провайдером){NC}")
@@ -29148,6 +29152,8 @@ def _menu_diagnostics() -> None:
         elif ch == "9":
             do_system_dashboard()
             input(f"{BLUE}Нажмите Enter...{NC}")
+        elif ch.lower() == "nb":
+            do_network_bench_menu()
         elif ch.lower() == "s":
             print()
             print(f"{BOLD}Статус сервисов:{NC}")
@@ -29484,6 +29490,7 @@ def _menu_security() -> None:
         _box_sep()
         _box_item("P", f"🍯 Honeypot-порт  {DIM}(ловушка для сканеров){NC}")
         _box_item("D", f"🔍 DPI-детектор  {DIM}(блокировка зондирования){NC}")
+        _box_item("CS", f"🛰️  Проверка цензуры провайдера  {DIM}(TLS/TCP/HTTP/DNS снаружи){NC}")
         _box_item("B", f"⚡ Smart Balancer{_bal_na}")
         _box_item("S", f"🗓️  Планировщик задач  {DIM}(все cron/systemd в одном месте){NC}")
         _box_sep()
@@ -29549,6 +29556,8 @@ def _menu_security() -> None:
             do_manage_honeypot()
         elif ch.lower() == "d":
             do_manage_dpi_detector()
+        elif ch.lower() == "cs":
+            do_dpi_censor_check_menu()
         elif ch.lower() == "b":
             do_manage_smart_balancer()
         elif ch.lower() == "s":

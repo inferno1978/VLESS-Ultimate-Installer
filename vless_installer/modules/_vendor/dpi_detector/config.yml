@@ -1,0 +1,125 @@
+# ==========================================
+# Конфигурация DPI Detector
+# ==========================================
+
+# Максимальное количество одновременных запросов.
+# Чем выше значение, тем быстрее тесты, но нагрузка на систему и сеть растет.
+MAX_CONCURRENT: 100
+
+# Адрес локального или удаленного прокси (http/socks5).
+# В формате "протокол://ip:порт" или "протокол://user:pass@ip:port"
+# Примеры: "http://127.0.0.1:8080", "socks5://admin:password@1.2.3.4:1080"
+# Если прокси не нужен — null
+PROXY_URL: null
+
+# === Таймауты (в секундах) ===
+# Время ожидания установки TCP-соединения
+CONNECT_TIMEOUT: 8.0
+# Время ожидания ответа от сервера после установки соединения
+READ_TIMEOUT: 8.0
+# Время ожидания свободного сокета в пуле соединений OS
+POOL_TIMEOUT: 2.0
+# Таймаут для первичного сбора IP-заглушек провайдера
+STUB_IPS_TIMEOUT: 5.0
+
+# === Настройки теста TCP 16-20KB ===
+TCP_BLOCK_MIN_KB: 12 # Минимальный порог данных для анализа
+TCP_BLOCK_MAX_KB: 69 # Максимальный порог данных для анализа
+FAT_DEFAULT_SNI: "example.com"
+FAT_CONNECT_TIMEOUT: 8.0
+FAT_READ_TIMEOUT: 12.0
+
+USER_AGENT: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/133.0.0.0 Safari/537.36"
+
+# === Windows-специфичные errno коды ===
+WSAECONNRESET: 10054
+WSAECONNREFUSED: 10061
+WSAETIMEDOUT: 10060
+WSAENETUNREACH: 10051
+WSAEHOSTUNREACH: 10065
+WSAECONNABORTED: 10053
+WSAENETDOWN: 10050
+WSAEACCES: 10013
+
+# === Настройки DNS проверки ===
+DNS_CHECK_TIMEOUT: 5.0
+
+# Список доменов для теста доступности и подмены DNS
+DNS_CHECK_DOMAINS:
+  - "rutor.info"
+  - "flibusta.is"
+  - "clubtone.do.am"
+  - "rezka.ag"
+  - "shikimori.one"
+  - "www.fastmail.com"
+  # Доп домены:
+  # - "www.youtube.com"
+  # - "youtube.com"
+  # - "m.youtube.com"
+  # - "limetorrents.pro"
+  # - "www.whatsapp.com"
+  # - "newtime.ua",
+  # - "fast-die.kiev.ua",
+  # - "church.ua",
+  # - "www.lgbt.org.ua",
+
+# Публичные DNS серверы (UDP)
+DNS_UDP_SERVERS:
+  - ["8.8.8.8", "Google"]
+  - ["1.1.1.1", "Cloudflare"]
+  - ["9.9.9.9", "Quad9"]
+  - ["94.140.14.14", "AdGuard"]
+  - ["77.88.8.8", "Yandex"]
+  - ["223.5.5.5", "Alibaba"]
+  - ["208.67.222.222", "OpenDNS"]
+  - ["76.76.2.0", "ControlD"]
+  - ["194.242.2.2", "Mullvad"]
+
+# Публичные DoH JSON API серверы (HTTPS)
+DNS_DOH_SERVERS:
+  - ["https://8.8.8.8/resolve", "Google"]
+  - ["https://dns.google/resolve", "Google"]
+  - ["https://1.1.1.1/dns-query", "Cloudflare"]
+  - ["https://cloudflare-dns.com/dns-query", "Cloudflare"]
+  - ["https://one.one.one.one/dns-query", "Cloudflare"]
+  - ["https://dns.adguard-dns.com/resolve", "AdGuard"]
+  - ["https://dns.alidns.com/resolve", "Alibaba"]
+
+# --- Тест 2: Проверка доступности DNS-серверов ---
+DNS_AVAILABILITY_DOMAINS:
+  - "example.com"
+  - "vk.com"
+  - "ozon.ru"
+  - "habr.com"
+  - "mail.ru"
+
+# Серверы для теста доступности. Каждый сервер — [адрес, имя, тип].
+# Типы: "udp", "doh_json", "doh_wire"
+DNS_AVAILABILITY_SERVERS:
+  # ── UDP ──────────────────────────────────────────────────────────────────────
+  - ["8.8.8.8",          "Google",        "udp"]
+  - ["1.1.1.1",          "Cloudflare",    "udp"]
+  - ["9.9.9.9",          "Quad9",         "udp"]
+  - ["94.140.14.14",     "AdGuard",       "udp"]
+  - ["77.88.8.8",        "Yandex",        "udp"]
+  - ["208.67.222.222",   "OpenDNS",       "udp"]
+  - ["76.76.2.0",        "ControlD",      "udp"]
+  - ["185.228.168.9",    "CleanBrowsing", "udp"]
+  - ["76.223.122.150",   "NextDNS",       "udp"]
+
+#   - ["194.242.2.2", "Mullvad", "udp"] - походу заблочен
+#  - [ "https://doh.mullvad.net/dns-query", "Mullvad", "doh_wire" ]
+
+  # ── DoH Wire (RFC 8484, POST/GET application/dns-message) ───────────────────
+  - ["https://dns.google/dns-query",                      "Google",          "doh_wire"]
+  - ["https://cloudflare-dns.com/dns-query",              "Cloudflare",      "doh_wire"]
+  - ["https://1.1.1.1/dns-query",                        "Cloudflare (IP)", "doh_wire"]
+  - ["https://dns.adguard-dns.com/dns-query",             "AdGuard",         "doh_wire"]
+  - ["https://dns.quad9.net/dns-query",                   "Quad9",           "doh_wire"]
+  - ["https://doh.opendns.com/dns-query",                 "OpenDNS",         "doh_wire"]
+  - ["https://common.dot.dns.yandex.net/dns-query",       "Yandex",          "doh_wire"]
+  - ["https://dns.nextdns.io/dns-query",                  "NextDNS",         "doh_wire"]
+  - ["https://doh.cleanbrowsing.org/doh/security-filter", "CleanBrowsing",   "doh_wire"]
+  - ["https://dns.sb/dns-query",                          "DNS.SB",          "doh_wire"]
+  - ["https://doh.dns.sb/dns-query",                      "DNS.SB (alt)",    "doh_wire"]
+  - ["https://doh.libredns.gr/dns-query",                 "LibreDNS",        "doh_wire"]
