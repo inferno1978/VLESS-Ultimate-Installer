@@ -105,8 +105,16 @@ def _install_deps() -> bool:
         print(f"{RED}[ERR]{NC} requirements.txt не найден: {_REQS}")
         return False
     print(f"{CYAN}Устанавливаю зависимости (httpx, rich, PyYAML)...{NC}")
+    # --ignore-installed: на Debian/Ubuntu PyYAML (и иногда другие пакеты)
+    # часто стоят системно через apt (python3-yaml) — у таких пакетов нет
+    # файла RECORD, который pip требует для апгрейда/удаления, и без этого
+    # флага установка падает с "Cannot uninstall ...: RECORD file not found".
+    # Флаг просто ставит свою версию в обход системной, ничего не трогая
+    # в apt — безопасно для основного интерпретатора установщика, так как
+    # эти зависимости используются только в subprocess для вендоренного
+    # dpi_detector, а не импортируются в _core.py.
     cmd = [sys.executable, "-m", "pip", "install", "--break-system-packages",
-           "-r", str(_REQS)]
+           "--ignore-installed", "-r", str(_REQS)]
     try:
         r = subprocess.run(cmd, timeout=300)
     except Exception as e:
@@ -116,7 +124,7 @@ def _install_deps() -> bool:
     if r.returncode != 0:
         print(f"{RED}[ERR]{NC} pip install завершился с ошибкой (код {r.returncode}).")
         print(f"{DIM}Если PyPI недоступен из-за блокировок — попробуйте вручную:{NC}")
-        print(f"{DIM}  {sys.executable} -m pip install --break-system-packages -r {_REQS}{NC}")
+        print(f"{DIM}  {sys.executable} -m pip install --break-system-packages --ignore-installed -r {_REQS}{NC}")
         _log("ERROR", f"pip install exit code {r.returncode}")
         return False
     _log("SUCCESS", "зависимости dpi-detector установлены")
