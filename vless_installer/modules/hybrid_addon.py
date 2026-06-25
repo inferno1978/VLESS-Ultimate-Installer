@@ -937,10 +937,75 @@ def _menu_install(default_port: int = 443) -> None:
         })
 
         print_summary(creds)
+        _show_mieru_client_links(creds, get_public_ip())
         _log("SUCCESS", "hybrid_addon установлен успешно (через меню установщика)")
     except SystemExit:
         c_red("Установка прервана аддоном на одном из системных шагов (см. сообщение выше) — "
               "проверь руками, что прод не остался без входа.")
+
+
+def _show_mieru_client_links(creds: dict, server_ip: str) -> None:
+    """Доп. клиентская выдача (только для пути через меню установщика):
+    mierus:// для Karing/sing-box, mierus:// для Nekobox, sing-box JSON
+    для Karing (mierus:// в нём не работает — только JSON-файл) и QR.
+
+    Переиспользует уже проверенные форматы из modules/mieru.py — лениво
+    импортирует их прямо здесь, а не в шапке файла. main() (CLI-режим)
+    эту функцию не зовёт вообще, поэтому "sudo python3 hybrid_addon.py"
+    как раньше не требует пакета vless_installer и работает чисто на
+    stdlib — ломается только эта, чисто меню-шная надстройка, если
+    что-то пойдёт не так, и то лишь с понятным предупреждением.
+    """
+    try:
+        from vless_installer.modules.mieru import (
+            _gen_client_share_link,
+            _gen_client_share_link_nekobox,
+            _gen_singbox_outbound,
+            _print_qr,
+        )
+    except ImportError as e:
+        c_yellow(f"Не удалось подгрузить генератор клиентских ссылок Mieru ({e}) — "
+                 f"логин/пароль/порт выше уже выданы, настрой клиент вручную.")
+        return
+
+    for transport, data in creds.items():
+        port = data["port"]
+        login = data["login"]
+        password = data["password"]
+        proto = transport.upper()  # "TCP" / "UDP"
+
+        share_link = _gen_client_share_link(server_ip, port, port, proto, login, password)
+        share_link_neko = _gen_client_share_link_nekobox(server_ip, port, proto, login, password)
+
+        print()
+        c_cyan(f"Клиентская выдача — {proto}:")
+        print(f"  {BOLD}Ссылка для Karing (sing-box core):{NC}")
+        print(f"  {YELLOW}{share_link}{NC}")
+        print()
+        print(f"  {BOLD}Ссылка для Nekobox / Nyamebox:{NC}")
+        print(f"  {YELLOW}{share_link_neko}{NC}")
+
+        outbound = _gen_singbox_outbound(server_ip, port, port, proto, login, password)
+        full_config = {
+            "log": {"level": "info"},
+            "dns": {
+                "servers": [
+                    {"tag": "google", "address": "8.8.8.8"},
+                    {"tag": "local", "address": "1.1.1.1", "detour": "direct"},
+                ]
+            },
+            "outbounds": [outbound, {"type": "direct", "tag": "direct"}],
+            "route": {"final": outbound["tag"]},
+        }
+        cfg_path = Path(f"/tmp/karing-mieru-hybrid-{transport}-{login}.json")
+        try:
+            cfg_path.write_text(json.dumps(full_config, indent=2, ensure_ascii=False), encoding="utf-8")
+            print()
+            c_yellow(f"mierus:// НЕ работает в Karing — для него файл: {cfg_path}")
+        except OSError as e:
+            c_red(f"Не удалось сохранить JSON-конфиг для Karing: {e}")
+
+        _print_qr(share_link, f"Karing / mierus:// ({proto})")
 
 
 def _menu_rollback() -> None:

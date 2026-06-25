@@ -228,6 +228,8 @@ def _box_link(link: str, color: str = "") -> None:
         print(f"{CYAN}║{NC}  {color}{chunk}{NC}{' ' * pad}{CYAN}║{NC}")
         i += max_w
 
+# Также используется из hybrid_addon.py (do_hybrid_addon_menu) — при правке
+# сигнатуры проверь использование там.
 def _print_qr(data: str, label: str = "") -> None:
     if not shutil.which("qrencode"):
         print(f"  {YELLOW}⚠{NC}  qrencode не установлен: apt install qrencode")
@@ -657,6 +659,9 @@ def _ensure_time_sync() -> None:
 # ══════════════════════════════════════════════════════════════════════════════
 #  SING-BOX КОНФИГ ДЛЯ КЛИЕНТА
 # ══════════════════════════════════════════════════════════════════════════════
+# Эти три функции (до _run_install) — чистые, без обращения к глобальному
+# состоянию модуля. Также используются из hybrid_addon.py
+# (_show_mieru_client_links) — при правке формата/сигнатуры проверь и там.
 def _gen_singbox_outbound(server_ip: str, port_start: int, port_end: int,
                            protocol: str, username: str, password: str) -> dict:
     """
