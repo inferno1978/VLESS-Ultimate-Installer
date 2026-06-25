@@ -792,3 +792,202 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
+
+# ───────────────────────── Точка входа из меню установщика (раздел 1) ─────────────────────────
+# main() выше НЕ ТРОГАЕМ — это самостоятельный CLI (sudo python3 hybrid_addon.py),
+# им можно продолжать пользоваться напрямую как раньше.
+#
+# Ниже — отдельная обёртка для интерактивного подменю _core.py. Повторяет тот же
+# порядок шагов, что и install-ветка main(), и дёргает те же готовые функции выше
+# (find_xray_config, pick_target_inbound, install_mita, build_mita_config и т.д.),
+# но без argparse и с возвратом в меню (а не sys.exit) при ошибке на любом шаге —
+# многие хелперы выше вызывают die(), а die() делает sys.exit(), что в контексте
+# CLI нормально, а в контексте интерактивного меню убило бы весь установщик.
+
+def _menu_status() -> dict:
+    """Текущее состояние аддона для отображения в меню. Не падает, если файла нет/он битый."""
+    if not STATE_FILE.exists():
+        return {"installed": False}
+    try:
+        st = json.loads(STATE_FILE.read_text(encoding="utf-8"))
+        st["installed"] = True
+        return st
+    except (OSError, json.JSONDecodeError):
+        return {"installed": False, "corrupt": True}
+
+
+def _menu_install(default_port: int = 443) -> None:
+    """Интерактивная установка для меню — те же шаги, что в main(), но без argparse
+    и без падения всего процесса при die() на промежуточных шагах."""
+    box_header("MIERU HYBRID ADDON — УСТАНОВКА")
+
+    raw = input(f"Текущий внешний порт VLESS-инбаунда, который нужно освободить [{default_port}]: ").strip()
+    port = int(raw) if raw.isdigit() and 1 <= int(raw) <= 65535 else default_port
+
+    print()
+    c_cyan("Транспорт Mieru: 1) both (по умолчанию)  2) tcp  3) udp")
+    t_raw = input("Выбор [1]: ").strip()
+    transport = {"2": "tcp", "3": "udp"}.get(t_raw, "both")
+
+    try:
+        xray_config_path = find_xray_config()
+        c_cyan(f"Использую конфиг Xray: {xray_config_path}")
+        config = load_json(xray_config_path)
+        target = pick_target_inbound(config, port, None)
+    except SystemExit:
+        c_red("Установка прервана на шаге поиска конфигурации Xray (см. сообщение выше). "
+              "Ничего не изменено.")
+        return
+
+    want_tcp = transport in ("tcp", "both")
+    want_udp = transport in ("udp", "both")
+    tcp_port = port
+    udp_port = port + 1
+
+    print()
+    c_cyan("Выбор портов для Mieru (Enter — оставить значение по умолчанию):")
+    taken = set()
+    if want_tcp:
+        tcp_port = ask_port("  TCP-порт Mieru", tcp_port, taken=taken)
+        taken.add(tcp_port)
+    if want_udp:
+        udp_port = ask_port("  UDP-порт Mieru", udp_port, taken=taken)
+        taken.add(udp_port)
+
+    if want_tcp and want_udp and tcp_port == udp_port:
+        c_red(f"TCP- и UDP-порт совпадают ({tcp_port}) — это разные транспорты, но порту "
+              f"всё равно нужно быть разным. Установка отменена, ничего не изменено.")
+        return
+
+    if want_udp:
+        occupied, detail = check_port_listening(udp_port, "udp")
+        if occupied:
+            c_red(f"UDP-порт {udp_port} уже занят:\n  {detail}\n"
+                  f"  Выбери другой при повторном запуске. Ничего не изменено.")
+            return
+
+    c_cyan(f"Итоговые порты Mieru: "
+           f"{f'TCP={tcp_port} ' if want_tcp else ''}{f'UDP={udp_port}' if want_udp else ''}")
+
+    print()
+    c_yellow("Будет изменено: указанный inbound станет SOCKS-петлёй на 127.0.0.1:"
+             f"{LOOPBACK_SOCKS_PORT}, протокол сменится с vless на socks.")
+    c_yellow("Внешний доступ по старому VLESS-линку на этом порту ПЕРЕСТАНЕТ работать "
+             "— вместо него будет доступ через Mieru.")
+    if not confirm("Продолжить?"):
+        c_cyan("Отменено пользователем, ничего не тронуто.")
+        return
+
+    try:
+        backup_path = backup_config(xray_config_path)
+        original_inbound = convert_inbound_to_socks_loopback(target)
+
+        if not apply_xray_change(xray_config_path, config, backup_path):
+            c_red("Установка прервана на шаге Xray — Mieru НЕ устанавливался, прод не тронут "
+                  "(или уже автоматически восстановлен).")
+            return
+
+        if want_tcp:
+            occupied, detail = check_port_listening(tcp_port, "tcp")
+            if occupied:
+                c_red(f"TCP-порт {tcp_port} занят чем-то ещё после освобождения Xray:\n  {detail}")
+                c_yellow("Откатываю Xray обратно, чтобы не остаться без входа вообще...")
+                shutil.copy2(backup_path, xray_config_path)
+                restart_service("xray")
+                c_red("Установка прервана — старый VLESS-инбаунд восстановлен.")
+                return
+
+        install_mita()
+
+        mita_config, creds = build_mita_config(transport, tcp_port, udp_port)
+
+        if not apply_mita_config(mita_config):
+            c_red("Mieru не поднялся с новым конфигом. Откатываю Xray, чтобы не остаться "
+                  "без входа вообще.")
+            shutil.copy2(backup_path, xray_config_path)
+            restart_service("xray")
+            c_red("Установка прервана — старый VLESS-инбаунд восстановлен, Mieru не используется.")
+            return
+
+        fw = detect_firewall()
+        c_cyan(f"Файрвол: {fw}")
+        firewall_rollback = []
+        if want_tcp:
+            firewall_rollback.append(open_port(fw, tcp_port, "tcp"))
+        if want_udp:
+            firewall_rollback.append(open_port(fw, udp_port, "udp"))
+
+        c_cyan("Проверяю локальный SOCKS-мост (Xray)...")
+        if selftest_socks5():
+            c_green("SOCKS5-мост на 127.0.0.1:1080 отвечает корректно.")
+        else:
+            c_yellow("SOCKS5-мост не ответил как ожидалось — не критично для установки, "
+                     "но стоит проверить логи Xray, прежде чем давать ссылку клиентам.")
+
+        save_state({
+            "xray_config_path": str(xray_config_path),
+            "backup_path": str(backup_path),
+            "inbound_tag": original_inbound.get("tag"),
+            "firewall_rollback": firewall_rollback,
+            "transport": transport,
+            "tcp_port": tcp_port if want_tcp else None,
+            "udp_port": udp_port if want_udp else None,
+            "created": datetime.now().isoformat(),
+        })
+
+        print_summary(creds)
+        _log("SUCCESS", "hybrid_addon установлен успешно (через меню установщика)")
+    except SystemExit:
+        c_red("Установка прервана аддоном на одном из системных шагов (см. сообщение выше) — "
+              "проверь руками, что прод не остался без входа.")
+
+
+def _menu_rollback() -> None:
+    try:
+        do_rollback()
+    except SystemExit:
+        c_red("Откат прерван (см. сообщение выше) — проверь config.json и службы Xray/Mieru руками.")
+
+
+def do_hybrid_addon_menu(default_port: int = 443) -> None:
+    """Точка входа из _core.py: отдельный пункт в разделе 1 «Установка и Система»."""
+    while True:
+        os.system("clear")
+        st = _menu_status()
+        box_header("MIERU HYBRID ADDON")
+        print()
+        if st.get("installed"):
+            transport = st.get("transport", "?")
+            tcp_p = st.get("tcp_port")
+            udp_p = st.get("udp_port")
+            ports = ", ".join(
+                p for p in (f"TCP={tcp_p}" if tcp_p else "", f"UDP={udp_p}" if udp_p else "") if p
+            )
+            print(f"  {BOLD}Статус:{NC} {GREEN}установлен{NC}")
+            print(f"  Транспорт: {transport}   Порты: {ports}")
+            print()
+            print(f"  {CYAN}1{NC}  Откатить  {DIM}(восстановить исходный VLESS-инбаунд){NC}")
+        else:
+            print(f"  {BOLD}Статус:{NC} {DIM}не установлен{NC}")
+            print()
+            print(f"  {CYAN}1{NC}  Установить")
+        print(f"  {DIM}0  Назад{NC}")
+        print()
+        try:
+            ch = input(f"{CYAN}Выбор:{NC} ").strip()
+        except (EOFError, KeyboardInterrupt):
+            print()
+            return
+
+        if ch == "1":
+            if st.get("installed"):
+                _menu_rollback()
+            else:
+                _menu_install(default_port=default_port)
+            input(f"{BOLD}Нажмите Enter...{NC}")
+        elif ch == "0" or ch == "":
+            return
+        else:
+            c_red(f"Неверный выбор: {ch}")
+            time.sleep(1)

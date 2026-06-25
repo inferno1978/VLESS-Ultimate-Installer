@@ -75,6 +75,7 @@ from vless_installer.modules.wdtt import do_wdtt_menu
 from vless_installer.modules.naiveproxy import do_naiveproxy_menu
 from vless_installer.modules.mieru import do_mieru_menu
 from vless_installer.modules.webdav_tunnel import do_webdav_tunnel_menu
+from vless_installer.modules.hybrid_addon import do_hybrid_addon_menu
 from vless_installer.modules.ripe_file_age   import (
     check_ripe_file_age, ripe_file_age_banner,
 )
@@ -28203,6 +28204,7 @@ def _menu_install_system() -> None:
         _box_item("6", f"🛠️  Аварийное восстановление  {DIM}(из state.json, без переустановки){NC}")
         _box_item("7", "🗑️  Удалить установку")
         _box_item("8", "🧪 Запустить unit-тесты")
+        _box_item("9", f"🔀 Mieru Hybrid Addon  {DIM}(Mieru поверх Xray на Entry-ноде, SOCKS-петля){NC}")
         _box_row()
         _box_back()
         _box_bottom()
@@ -28236,6 +28238,13 @@ def _menu_install_system() -> None:
         elif ch == "8":
             run_unit_tests()
             input(f"{BLUE}Нажмите Enter...{NC}")
+        elif ch == "9":
+            try:
+                _load_state_into_globals()
+                do_hybrid_addon_menu(default_port=SERVER_PORT)
+            except ImportError as _e:
+                warn(f"Модуль Mieru Hybrid Addon не найден: {_e}")
+                time.sleep(2)
         elif ch.lower() == "q" or ch == "":
             break
         else:
