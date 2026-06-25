@@ -28,6 +28,7 @@ import platform
 import secrets
 import shutil
 import socket
+import stat
 import subprocess
 import sys
 import tempfile
@@ -275,15 +276,39 @@ def pick_target_inbound(config: dict, port: int, inbound_tag: str = None) -> dic
 
 
 # ───────────────────────── Шаг 2: бэкап и конвертация inbound ─────────────────────────
-def backup_config(xray_config_path: Path) -> Path:
+def _capture_owner_mode(path: Path) -> dict:
+    """Снимает владельца/группу/права ДО любых модификаций — это "эталон",
+    к которому нужно возвращаться после каждой записи в config.json."""
+    st = path.stat()
+    return {"uid": st.st_uid, "gid": st.st_gid, "mode": stat.S_IMODE(st.st_mode)}
+
+
+def _restore_owner_mode(path: Path, owner_mode: dict) -> None:
+    """shutil.copy2()/tempfile.mkstemp()+move НЕ восстанавливают владельца и группу —
+    copy2 копирует только биты прав (через copystat), а mkstemp создаёт файл от имени
+    текущего процесса (root:root). Без этого вызова Xray (User=xray Group=xray) не
+    сможет прочитать config.json: пермишены 0640 без правильной группы = permission denied."""
+    try:
+        os.chown(str(path), owner_mode["uid"], owner_mode["gid"])
+        os.chmod(str(path), owner_mode["mode"])
+    except OSError as e:
+        c_yellow(f"Не удалось восстановить владельца/права на {path}: {e}\n"
+                 f"  Проверь руками: chown {owner_mode['uid']}:{owner_mode['gid']} '{path}' && "
+                 f"chmod {oct(owner_mode['mode'])} '{path}'")
+
+
+def backup_config(xray_config_path: Path) -> tuple[Path, dict]:
+    owner_mode = _capture_owner_mode(xray_config_path)
     ts = datetime.now().strftime("%Y%m%d-%H%M%S")
     backup_path = xray_config_path.with_name(f"{xray_config_path.name}.bak-{ts}")
     shutil.copy2(xray_config_path, backup_path)
+    _restore_owner_mode(backup_path, owner_mode)
     # держим также "последний" бэкап под предсказуемым именем — как договорено в проекте
     latest = xray_config_path.with_name(f"{xray_config_path.name}.bak")
     shutil.copy2(xray_config_path, latest)
+    _restore_owner_mode(latest, owner_mode)
     c_green(f"Бэкап сохранён: {backup_path}")
-    return backup_path
+    return backup_path, owner_mode
 
 
 def convert_inbound_to_socks_loopback(target: dict) -> dict:
@@ -338,7 +363,8 @@ def restart_service(name: str) -> bool:
     return active
 
 
-def apply_xray_change(xray_config_path: Path, config: dict, backup_path: Path) -> bool:
+def apply_xray_change(xray_config_path: Path, config: dict, backup_path: Path,
+                       owner_mode: dict) -> bool:
     tmp_fd, tmp_name = tempfile.mkstemp(prefix="xray_config_", suffix=".json",
                                          dir=str(xray_config_path.parent))
     tmp_path = Path(tmp_name)
@@ -354,6 +380,10 @@ def apply_xray_change(xray_config_path: Path, config: dict, backup_path: Path) -
         return False
 
     shutil.move(str(tmp_path), str(xray_config_path))
+    # mkstemp создаёт файл от имени текущего процесса (root:root, 0600) — после move()
+    # (это os.rename, целиком подменяющий inode) config.json остаётся root:root, и
+    # Xray (User=xray Group=xray) не сможет его открыть. Возвращаем владельца/права.
+    _restore_owner_mode(xray_config_path, owner_mode)
     c_cyan("Перезапускаю Xray с новым inbound...")
     if restart_service("xray"):
         return True
@@ -361,6 +391,7 @@ def apply_xray_change(xray_config_path: Path, config: dict, backup_path: Path) -
     # ── автоматический rollback, если Xray не поднялся ──
     c_yellow("Откатываю config.json из бэкапа и перезапускаю Xray...")
     shutil.copy2(backup_path, xray_config_path)
+    _restore_owner_mode(xray_config_path, owner_mode)
     restart_service("xray")
     c_red("Изменения отменены автоматически — прежний VLESS-инбаунд восстановлен.")
     return False
@@ -588,9 +619,16 @@ def do_rollback() -> None:
 
     xray_config_path = Path(state["xray_config_path"])
     backup_path = Path(state["backup_path"])
+    owner_mode = state.get("config_owner_mode")
 
     if backup_path.exists():
         shutil.copy2(backup_path, xray_config_path)
+        if owner_mode:
+            _restore_owner_mode(xray_config_path, owner_mode)
+        else:
+            c_yellow(f"В {STATE_FILE} нет сохранённых владельца/прав config.json "
+                     f"(старый state-файл?) — проверь руками: "
+                     f"ls -la '{xray_config_path}' и сравни с другими файлами в той же папке.")
         c_green(f"config.json восстановлен из {backup_path}")
         restart_service("xray")
     else:
@@ -730,10 +768,10 @@ def main() -> None:
         c_cyan("Отменено пользователем, ничего не тронуто.")
         return
 
-    backup_path = backup_config(xray_config_path)
+    backup_path, owner_mode = backup_config(xray_config_path)
     original_inbound = convert_inbound_to_socks_loopback(target)
 
-    if not apply_xray_change(xray_config_path, config, backup_path):
+    if not apply_xray_change(xray_config_path, config, backup_path, owner_mode):
         die("Установка прервана на шаге Xray — Mieru НЕ устанавливался, прод не тронут "
             "(или уже автоматически восстановлен).")
 
@@ -746,6 +784,7 @@ def main() -> None:
             c_red(f"TCP-порт {tcp_port} занят чем-то ещё после освобождения Xray:\n  {detail}")
             c_yellow("Откатываю Xray обратно, чтобы не остаться без входа вообще...")
             shutil.copy2(backup_path, xray_config_path)
+            _restore_owner_mode(xray_config_path, owner_mode)
             restart_service("xray")
             die("Установка прервана — старый VLESS-инбаунд восстановлен. "
                 "Разберись, что заняло порт, и попробуй снова.")
@@ -757,6 +796,7 @@ def main() -> None:
     if not apply_mita_config(mita_config):
         c_red("Mieru не поднялся с новым конфигом. Откатываю Xray, чтобы не остаться без входа вообще.")
         shutil.copy2(backup_path, xray_config_path)
+        _restore_owner_mode(xray_config_path, owner_mode)
         restart_service("xray")
         die("Установка прервана — старый VLESS-инбаунд восстановлен, Mieru не используется.")
 
@@ -778,6 +818,7 @@ def main() -> None:
     save_state({
         "xray_config_path": str(xray_config_path),
         "backup_path": str(backup_path),
+        "config_owner_mode": owner_mode,
         "inbound_tag": original_inbound.get("tag"),
         "firewall_rollback": firewall_rollback,
         "transport": args.transport,
@@ -880,10 +921,10 @@ def _menu_install(default_port: int = 443) -> None:
         return
 
     try:
-        backup_path = backup_config(xray_config_path)
+        backup_path, owner_mode = backup_config(xray_config_path)
         original_inbound = convert_inbound_to_socks_loopback(target)
 
-        if not apply_xray_change(xray_config_path, config, backup_path):
+        if not apply_xray_change(xray_config_path, config, backup_path, owner_mode):
             c_red("Установка прервана на шаге Xray — Mieru НЕ устанавливался, прод не тронут "
                   "(или уже автоматически восстановлен).")
             return
@@ -894,6 +935,7 @@ def _menu_install(default_port: int = 443) -> None:
                 c_red(f"TCP-порт {tcp_port} занят чем-то ещё после освобождения Xray:\n  {detail}")
                 c_yellow("Откатываю Xray обратно, чтобы не остаться без входа вообще...")
                 shutil.copy2(backup_path, xray_config_path)
+                _restore_owner_mode(xray_config_path, owner_mode)
                 restart_service("xray")
                 c_red("Установка прервана — старый VLESS-инбаунд восстановлен.")
                 return
@@ -906,6 +948,7 @@ def _menu_install(default_port: int = 443) -> None:
             c_red("Mieru не поднялся с новым конфигом. Откатываю Xray, чтобы не остаться "
                   "без входа вообще.")
             shutil.copy2(backup_path, xray_config_path)
+            _restore_owner_mode(xray_config_path, owner_mode)
             restart_service("xray")
             c_red("Установка прервана — старый VLESS-инбаунд восстановлен, Mieru не используется.")
             return
@@ -928,6 +971,7 @@ def _menu_install(default_port: int = 443) -> None:
         save_state({
             "xray_config_path": str(xray_config_path),
             "backup_path": str(backup_path),
+            "config_owner_mode": owner_mode,
             "inbound_tag": original_inbound.get("tag"),
             "firewall_rollback": firewall_rollback,
             "transport": transport,
