@@ -25,6 +25,7 @@ import argparse
 import json
 import os
 import platform
+import re
 import secrets
 import shutil
 import socket
@@ -33,6 +34,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import unicodedata
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -40,41 +42,297 @@ from datetime import datetime
 from pathlib import Path
 
 # ───────────────────────── Стиль вывода (как в основном проекте) ─────────────────────────
-RED = "\033[91m"
-GREEN = "\033[92m"
-YELLOW = "\033[93m"
-CYAN = "\033[96m"
-BOLD = "\033[1m"
-DIM = "\033[2m"
-NC = "\033[0m"
+# Самостоятельный (без импорта) порт алгоритмов рисования рамок и переноса строк
+# из vless_installer/modules/box_renderer.py — ТОЧНО так же, как modules/mieru.py
+# держит свою копию того же самого рисунка рамок, а не импортирует общий модуль.
+# Причина та же: hybrid_addon.py — самостоятельный CLI (см. докстринг выше,
+# "Не требует pip"), а box_renderer.py — часть пакета vless_installer. Импорт
+# его в шапке файла сломал бы "sudo python3 hybrid_addon.py" точно так же, как
+# уже один раз сломал бы лишний импорт mieru.py (см. _show_mieru_client_links —
+# там поэтому лениво, внутри функции). Здесь так сделать нельзя: рамки используются
+# буквально во всём файле, а не в одной функции — поэтому код продублирован, а не
+# импортирован. Если в box_renderer.py поменяется алгоритм/символика — здесь нужно
+# поправить отдельно, копия не синхронизируется автоматически.
+def _detect_colors() -> dict:
+    if sys.stdout.isatty():
+        return dict(
+            RED='\033[0;31m', GREEN='\033[0;32m', YELLOW='\033[1;33m',
+            CYAN='\033[0;36m', BOLD='\033[1m', DIM='\033[2m',
+            WHITE='\033[1;37m', NC='\033[0m',
+        )
+    return {k: '' for k in ('RED', 'GREEN', 'YELLOW', 'CYAN', 'BOLD', 'DIM', 'WHITE', 'NC')}
 
-OK = f"{GREEN}✓{NC}"
-ERR = f"{RED}✗{NC}"
-ARROW = f"{CYAN}→{NC}"
-WARN = f"{YELLOW}⚠{NC}"
+
+_C = _detect_colors()
+RED, GREEN, YELLOW, CYAN, BOLD, DIM, WHITE, NC = (
+    _C['RED'], _C['GREEN'], _C['YELLOW'], _C['CYAN'],
+    _C['BOLD'], _C['DIM'], _C['WHITE'], _C['NC'],
+)
+
+
+def _get_box_width() -> int:
+    """Внутренняя ширина рамки: ширина терминала минус 2, минимум 64, максимум 100
+    (как в box_renderer._get_box_width — тот же диапазон, та же логика)."""
+    cols = 80
+    env_cols = os.environ.get("COLUMNS", "").strip()
+    if env_cols.isdigit():
+        cols = int(env_cols)
+    try:
+        pty_cols = os.get_terminal_size().columns
+        cols = min(cols, pty_cols)
+    except OSError:
+        pass
+    return max(64, min(cols - 2, 100))
+
+
+_BOX_W = _get_box_width()
+_ANSI_RE = re.compile(r'\033\[[0-9;]*m')
+
+
+def _plain(s: str) -> str:
+    """Строка без ANSI-кодов — для подсчёта реальной видимой ширины."""
+    return _ANSI_RE.sub('', s)
+
+
+def _wcslen(s: str) -> int:
+    """Видимая ширина строки в терминале: emoji/CJK = 2 колонки, варианты/комбинирующие
+    знаки = 0, обычные символы = 1. Та же логика, что в box_renderer._wcslen."""
+    plain = _plain(s)
+    width = 0
+    i = 0
+    while i < len(plain):
+        ch = plain[i]
+        cp = ord(ch)
+        if 0xFE00 <= cp <= 0xFE0F or cp in (0x200D, 0x200B, 0x200C):
+            i += 1
+            continue
+        if unicodedata.category(ch) in ('Mn', 'Me', 'Cf'):
+            i += 1
+            continue
+        if 0x1F1E6 <= cp <= 0x1F1FF:  # Regional Indicator (флаги)
+            width += 2
+            i += 1
+            continue
+        eaw = unicodedata.east_asian_width(ch)
+        if eaw in ('W', 'F') or cp >= 0x1F000:
+            width += 2
+        elif i + 1 < len(plain) and ord(plain[i + 1]) == 0xFE0F:
+            width += 2  # базовый emoji + VS16
+        else:
+            width += 1
+        i += 1
+    return width
+
+
+def _box_row(text: str = "") -> None:
+    """Одна строка внутри рамки: ║ text ... ║ — с автопереносом по словам,
+    если строка не влезает в _BOX_W. Правая граница всегда ровная — это
+    единственное место, рисующее правый ║, все остальные функции зовут его."""
+    if not text:
+        print(f"{CYAN}║{NC}{' ' * _BOX_W}{CYAN}║{NC}")
+        return
+
+    vis_w = _wcslen(text)
+    if vis_w <= _BOX_W:
+        pad = _BOX_W - vis_w
+        print(f"{CYAN}║{NC}{text}{' ' * pad}{CYAN}║{NC}")
+        return
+
+    # Не влезает — переносим по словам, сохраняя ведущий отступ.
+    plain = _plain(text)
+    leading_spaces = len(plain) - len(plain.lstrip(' '))
+    indent = ' ' * leading_spaces
+
+    pos, skipped_vis = 0, 0
+    while pos < len(text) and skipped_vis < leading_spaces:
+        m = _ANSI_RE.match(text, pos)
+        if m:
+            pos = m.end()
+            continue
+        if text[pos] == ' ':
+            skipped_vis += 1
+            pos += 1
+        else:
+            break
+    text_stripped = text[pos:]
+    prefix = ' ' * leading_spaces
+
+    words = text_stripped.split(' ')
+    lines_out = []
+    current = prefix
+    current_vis = leading_spaces
+
+    for word in words:
+        if not word:
+            if current_vis + 1 <= _BOX_W:
+                current += ' '
+                current_vis += 1
+            continue
+        word_vis = _wcslen(word)
+        sep_vis = 1 if current.strip() else 0
+        if current_vis + sep_vis + word_vis <= _BOX_W:
+            current = current + (' ' if current.strip() else '') + word
+            current_vis = current_vis + sep_vis + word_vis
+        else:
+            if current.strip():
+                lines_out.append(current)
+            avail = max(_BOX_W - leading_spaces, 8)
+            while _wcslen(word) > avail:
+                piece, pw = '', 0
+                for ch in word:
+                    cw = _wcslen(ch)
+                    if pw + cw > avail:
+                        break
+                    piece += ch
+                    pw += cw
+                lines_out.append(indent + piece)
+                word = word[len(piece):]
+            current = indent + word
+            current_vis = leading_spaces + _wcslen(word)
+
+    if current.strip() or not lines_out:
+        lines_out.append(current)
+
+    for line in lines_out:
+        pad = max(0, _BOX_W - _wcslen(line))
+        print(f"{CYAN}║{NC}{line}{' ' * pad}{CYAN}║{NC}")
+
+
+def _box_link(link: str) -> None:
+    """Длинная ссылка внутри рамки БЕЗ правого ║ (чтобы не резать URL посередине
+    токена и не мешать копированию) — разрывает только по & (границы query-парам.
+    Та же логика, что в box_renderer._box_link, без поддержки #label (тут не нужно)."""
+    colour = YELLOW
+    max_w = _BOX_W - 2
+    tokens, buf = [], ""
+    for ch in link:
+        buf += ch
+        if ch == "&":
+            tokens.append(buf)
+            buf = ""
+    if buf:
+        tokens.append(buf)
+
+    chunk, chunk_w = "", 0
+    for token in tokens:
+        tok_w = _wcslen(token)
+        if chunk_w + tok_w > max_w and chunk:
+            print(f" {colour}{chunk}{NC}")
+            chunk, chunk_w = token, tok_w
+        else:
+            chunk += token
+            chunk_w += tok_w
+        while chunk_w > max_w:
+            cut, cut_w = 0, 0
+            for ch in chunk:
+                cw = _wcslen(ch)
+                if cut_w + cw > max_w:
+                    break
+                cut_w += cw
+                cut += 1
+            print(f" {colour}{chunk[:cut]}{NC}")
+            chunk = chunk[cut:]
+            chunk_w = _wcslen(chunk)
+    if chunk:
+        print(f" {colour}{chunk}{NC}")
+
+
+def _box_top(title: str = "") -> None:
+    print(f"{CYAN}╔{'═' * _BOX_W}╗{NC}")
+    if title:
+        pad = _BOX_W - _wcslen(title)
+        lpad = pad // 2
+        rpad = pad - lpad
+        print(f"{CYAN}║{NC}{' ' * lpad}{BOLD}{WHITE}{title}{NC}{' ' * rpad}{CYAN}║{NC}")
+        print(f"{CYAN}╠{'═' * _BOX_W}║{NC}")
+
+
+def _box_sep() -> None:
+    print(f"{CYAN}╠{'═' * _BOX_W}║{NC}")
+
+
+def _box_bottom() -> None:
+    print(f"{CYAN}╚{'═' * _BOX_W}╝{NC}")
+
+
+def _box_item(key: str, label: str) -> None:
+    col = RED + BOLD if key.strip().upper() in ("Q", "0") else WHITE + BOLD
+    _box_row(f"  {DIM}[{NC}{col}{key}{NC}{DIM}]{NC}  {label}")
+
+
+def _box_kv(key: str, val: str, kw: int = 22) -> None:
+    """Строка 'ключ: значение' с выровненным отступом — для статусов/сводок."""
+    key_colored = f"{CYAN}{key}{NC}"
+    key_pad = max(0, kw - _wcslen(key_colored))
+    _box_row(f"  {key_colored}{' ' * key_pad}  {val}")
+
+
+# Символика и цвет — как в mieru.py (родственный, тоже самостоятельный Mieru-модуль),
+# а не [INFO]/[WARN] из box_renderer.py — это семейный стиль конкретно Mieru-модулей.
+def _box_wrap_msg(prefix_colored: str, msg: str) -> None:
+    """Строка с цветным префиксом-иконкой и переносом сообщения — продолжение
+    выравнивается под текст (а не под иконку), как в box_renderer._box_wrap_msg.
+    Понимает ручные '\\n' в msg (диагностика вида 'описание:\\n  детали') —
+    каждый сегмент переносится по словам отдельно, перенос — тот же отступ."""
+    prefix_plain_len = _wcslen(_plain(prefix_colored))
+    max_msg = max(_BOX_W - prefix_plain_len, 10)
+    indent = ' ' * prefix_plain_len
+
+    all_lines = []
+    for segment in msg.split('\n'):
+        words = segment.split(' ')
+        current = ''
+        for word in words:
+            if not word:
+                continue
+            candidate = (current + ' ' + word).lstrip() if current else word
+            if _wcslen(candidate) <= max_msg:
+                current = candidate
+            else:
+                if current:
+                    all_lines.append(current)
+                while _wcslen(word) > max_msg:
+                    piece, pw = '', 0
+                    for ch in word:
+                        cw = _wcslen(ch)
+                        if pw + cw > max_msg:
+                            break
+                        piece += ch
+                        pw += cw
+                    all_lines.append(piece)
+                    word = word[len(piece):]
+                current = word
+        all_lines.append(current)  # пустой segment -> пустая строка (нужно для "...\n" в конце)
+
+    if not all_lines:
+        _box_row(prefix_colored)
+        return
+    _box_row(f"{prefix_colored}{all_lines[0]}")
+    for line in all_lines[1:]:
+        _box_row(f"{indent}{line}" if line else "")
 
 
 def c_cyan(msg: str) -> None:
-    print(f"{ARROW} {msg}")
+    _box_wrap_msg(f"  {CYAN}→{NC}  ", msg)
 
 
 def c_green(msg: str) -> None:
-    print(f"{OK} {msg}")
+    _box_wrap_msg(f"  {GREEN}✓{NC}  ", msg)
 
 
 def c_red(msg: str) -> None:
-    print(f"{ERR} {msg}")
+    _box_wrap_msg(f"  {RED}✗{NC}  ", msg)
 
 
 def c_yellow(msg: str) -> None:
-    print(f"{WARN} {msg}")
+    _box_wrap_msg(f"  {YELLOW}⚠{NC}  ", msg)
 
 
 def box_header(title: str) -> None:
-    width = 64
-    print(f"{CYAN}{'═' * width}{NC}")
-    print(f"{CYAN}║{NC} {BOLD}{title.center(width - 4)}{NC} {CYAN}║{NC}")
-    print(f"{CYAN}{'═' * width}{NC}")
+    """Открывает новую рамку с заголовком. У каждой открытой через box_header()
+    секции есть парный _box_bottom() — ищи его в той же функции (через
+    try/finally, чтобы рамка закрывалась и при раннем return, и при die())."""
+    _box_top(title)
 
 
 def die(msg: str, code: int = 1) -> None:
@@ -85,9 +343,9 @@ def die(msg: str, code: int = 1) -> None:
 
 def confirm(prompt: str) -> bool:
     try:
-        ans = input(f"{BOLD}{prompt} [y/N]: {NC}").strip().lower()
+        ans = input(f"  {BOLD}{prompt} [y/N]: {NC}").strip().lower()
     except (EOFError, KeyboardInterrupt):
-        print()
+        _box_row()
         return False
     return ans in ("y", "yes", "д", "да")
 
@@ -126,17 +384,17 @@ def ask_port(label: str, default: int, taken: set = None) -> int:
         try:
             raw = input(f"{label} [{default}]: ").strip()
         except (EOFError, KeyboardInterrupt):
-            print()
+            _box_row()
             return default
         if not raw:
             port = default
         elif raw.isdigit() and 1 <= int(raw) <= 65535:
             port = int(raw)
         else:
-            print("  Введи число от 1 до 65535 (или просто Enter для значения по умолчанию).")
+            c_yellow("Введи число от 1 до 65535 (или просто Enter для значения по умолчанию).")
             continue
         if port in taken:
-            print(f"  Порт {port} уже занят другим транспортом в этой установке, выбери другой.")
+            c_yellow(f"Порт {port} уже занят другим транспортом в этой установке, выбери другой.")
             continue
         return port
 
@@ -172,7 +430,11 @@ def run(cmd, **kwargs):
 
 def require_root() -> None:
     if os.geteuid() != 0:
-        die("Запусти скрипт от root (sudo python3 hybrid_addon.py)")
+        # Обычный print, не через c_red/рамку — этот код может сработать
+        # до открытия любой рамки (как и в mieru.py для того же случая).
+        print(f"{RED}Запусти скрипт от root (sudo python3 hybrid_addon.py){NC}")
+        _log("ERROR", "Запусти скрипт от root (sudo python3 hybrid_addon.py)")
+        sys.exit(1)
 
 
 def save_state(state: dict) -> None:
@@ -233,7 +495,7 @@ def pick_target_inbound(config: dict, port: int, inbound_tag: str = None) -> dic
 
     c_cyan(f"Найдено vless-инбаундов всего: {len(vless_inbounds)}")
     for ib in vless_inbounds:
-        print(f"    {DIM}{describe_inbound(ib)}{NC}")
+        _box_row(f"    {DIM}{describe_inbound(ib)}{NC}")
 
     if inbound_tag:
         matches = [ib for ib in vless_inbounds if ib.get("tag") == inbound_tag]
@@ -343,7 +605,9 @@ def validate_xray_config(path: Path) -> bool:
     r = run([xray_bin, "run", "-test", "-config", str(path)])
     if r.returncode != 0:
         c_red("Xray не принял новый конфиг (preflight-тест провален):")
-        print(f"{DIM}{r.stdout}\n{r.stderr}{NC}")
+        for line in f"{r.stdout}\n{r.stderr}".splitlines():
+            if line.strip():
+                _box_row(f"    {DIM}{line}{NC}")
         return False
     c_green("Preflight-валидация конфига Xray пройдена (xray run -test).")
     return True
@@ -571,7 +835,7 @@ def _read_multiline_json() -> str:
 
 def _traffic_pattern_custom() -> dict:
     while True:
-        print()
+        _box_row()
         c_cyan("Paste trafficPattern JSON (пустая строка — завершить ввод):")
         raw = _read_multiline_json()
         if raw is None:
@@ -607,15 +871,14 @@ def _ask_traffic_pattern_mode(cli_mode: str = None) -> dict:
         c_cyan("Traffic Obfuscation: Disabled (флаг --traffic-pattern disabled).")
         return None
 
-    print()
+    _box_row()
     c_cyan("Traffic Obfuscation:")
-    print("  [1] Basic (Recommended)")
-    print("      nonce: NONCE_TYPE_PRINTABLE, tcpFragment: disabled")
-    print("  [2] Aggressive (для строгих DPI/ТСПУ-регионов)")
-    print("      nonce: NONCE_TYPE_PRINTABLE, tcpFragment: enabled (maxSleepMs=5)")
-    print("  [3] Custom — вставить свой JSON trafficPattern")
-    print("  [0] Disabled (без обфускации, как было раньше)")
-    choice = input("Выбор [1]: ").strip()
+    _box_item("1", f"Basic {DIM}(Recommended) — nonce: NONCE_TYPE_PRINTABLE, без tcpFragment{NC}")
+    _box_item("2", f"Aggressive {DIM}(для строгих DPI/ТСПУ) — + tcpFragment, maxSleepMs=5{NC}")
+    _box_item("3", "Custom — вставить свой JSON trafficPattern")
+    _box_item("0", "Disabled (без обфускации, как было раньше)")
+    _box_row()
+    choice = input("  Выбор [1]: ").strip()
 
     if choice in ("", "1"):
         return _traffic_pattern_basic()
@@ -636,10 +899,13 @@ def _print_traffic_pattern_snippet(traffic_pattern: dict) -> None:
     для ссылок/sing-box — тот выводится отдельно, см. _export_traffic_pattern_blob()."""
     if not traffic_pattern:
         return
-    print()
-    c_cyan("Traffic Obfuscation применён. Клиентский JSON-сниппет (trafficPattern):")
-    snippet = {"trafficPattern": traffic_pattern}
-    print(json.dumps(snippet, indent=2, ensure_ascii=False))
+    box_header("TRAFFIC OBFUSCATION — JSON-СНИППЕТ")
+    try:
+        snippet = {"trafficPattern": traffic_pattern}
+        for line in json.dumps(snippet, indent=2, ensure_ascii=False).splitlines():
+            _box_row(f"  {DIM}{line}{NC}")
+    finally:
+        _box_bottom()
 
 
 def _export_traffic_pattern_blob() -> str:
@@ -766,36 +1032,40 @@ def selftest_socks5(host="127.0.0.1", port=LOOPBACK_SOCKS_PORT, timeout=4) -> bo
 def do_rollback() -> None:
     state = load_state()
     box_header("ОТКАТ HYBRID MIERU ADDON")
+    try:
+        xray_config_path = Path(state["xray_config_path"])
+        backup_path = Path(state["backup_path"])
+        owner_mode = state.get("config_owner_mode")
 
-    xray_config_path = Path(state["xray_config_path"])
-    backup_path = Path(state["backup_path"])
-    owner_mode = state.get("config_owner_mode")
-
-    if backup_path.exists():
-        shutil.copy2(backup_path, xray_config_path)
-        if owner_mode:
-            _restore_owner_mode(xray_config_path, owner_mode)
+        if backup_path.exists():
+            shutil.copy2(backup_path, xray_config_path)
+            if owner_mode:
+                _restore_owner_mode(xray_config_path, owner_mode)
+            else:
+                c_yellow(f"В {STATE_FILE} нет сохранённых владельца/прав config.json "
+                         f"(старый state-файл?) — проверь руками: "
+                         f"ls -la '{xray_config_path}' и сравни с другими файлами в той же папке.")
+            c_green(f"config.json восстановлен из {backup_path}")
+            restart_service("xray")
         else:
-            c_yellow(f"В {STATE_FILE} нет сохранённых владельца/прав config.json "
-                     f"(старый state-файл?) — проверь руками: "
-                     f"ls -la '{xray_config_path}' и сравни с другими файлами в той же папке.")
-        c_green(f"config.json восстановлен из {backup_path}")
-        restart_service("xray")
-    else:
-        c_red(f"Бэкап {backup_path} не найден — config.json НЕ восстановлен, проверь руками.")
+            c_red(f"Бэкап {backup_path} не найден — config.json НЕ восстановлен, проверь руками.")
 
-    run(["systemctl", "stop", "mita"])
-    run(["systemctl", "disable", "mita"])
-    c_green("Mieru (mita) остановлен и снят с автозагрузки.")
+        run(["systemctl", "stop", "mita"])
+        run(["systemctl", "disable", "mita"])
+        c_green("Mieru (mita) остановлен и снят с автозагрузки.")
 
-    for rollback_cmd in state.get("firewall_rollback", []):
-        if rollback_cmd:
-            run(rollback_cmd.split())
-    c_green("Правила файрвола, добавленные аддоном, удалены (если были).")
+        for rollback_cmd in state.get("firewall_rollback", []):
+            if rollback_cmd:
+                run(rollback_cmd.split())
+        c_green("Правила файрвола, добавленные аддоном, удалены (если были).")
 
-    STATE_FILE.unlink(missing_ok=True)
-    c_green("Готово. Можешь проверить, что прежний VLESS-доступ снова работает.")
-    _log("SUCCESS", "rollback hybrid_addon выполнен")
+        STATE_FILE.unlink(missing_ok=True)
+        c_green("Готово. Можешь проверить, что прежний VLESS-доступ снова работает.")
+        _log("SUCCESS", "rollback hybrid_addon выполнен")
+    finally:
+        # Рамка закрывается всегда — и при успехе, и при die()/sys.exit() на
+        # любом шаге внутри блока выше (finally срабатывает и для SystemExit).
+        _box_bottom()
 
 
 # ───────────────────────── Финальный вывод ─────────────────────────
@@ -815,19 +1085,23 @@ def get_public_ip() -> str:
 def print_summary(creds: dict) -> None:
     ip = get_public_ip()
     box_header("MIERU HYBRID ADDON — ГОТОВО")
-    print(f"  {BOLD}Сервер (IP):{NC} {ip}")
+    _box_kv("Сервер (IP):", ip)
     if "tcp" in creds:
-        print(f"\n  {BOLD}TCP-вариант{NC}")
-        print(f"    Порт:     {creds['tcp']['port']}/tcp")
-        print(f"    Логин:    {creds['tcp']['login']}")
-        print(f"    Пароль:   {creds['tcp']['password']}")
+        _box_row()
+        _box_row(f"  {BOLD}TCP-вариант{NC}")
+        _box_kv("Порт:", f"{creds['tcp']['port']}/tcp", kw=14)
+        _box_kv("Логин:", creds['tcp']['login'], kw=14)
+        _box_kv("Пароль:", creds['tcp']['password'], kw=14)
     if "udp" in creds:
-        print(f"\n  {BOLD}UDP-вариант{NC}")
-        print(f"    Порт:     {creds['udp']['port']}/udp")
-        print(f"    Логин:    {creds['udp']['login']}")
-        print(f"    Пароль:   {creds['udp']['password']}")
-    print(f"\n  {DIM}Протокол клиента в Mieru: mieru / profile с этими данными.{NC}")
-    print(f"  {DIM}Откат в любой момент: sudo python3 hybrid_addon.py --rollback{NC}\n")
+        _box_row()
+        _box_row(f"  {BOLD}UDP-вариант{NC}")
+        _box_kv("Порт:", f"{creds['udp']['port']}/udp", kw=14)
+        _box_kv("Логин:", creds['udp']['login'], kw=14)
+        _box_kv("Пароль:", creds['udp']['password'], kw=14)
+    _box_row()
+    _box_row(f"  {DIM}Протокол клиента в Mieru: mieru / profile с этими данными.{NC}")
+    _box_row(f"  {DIM}Откат в любой момент: sudo python3 hybrid_addon.py --rollback{NC}")
+    _box_bottom()
 
 
 # ───────────────────────── main ─────────────────────────
@@ -870,125 +1144,137 @@ def main() -> None:
 
     box_header("MIERU HYBRID ADDON — УСТАНОВКА")
 
-    xray_config_path = Path(args.xray_config) if args.xray_config else find_xray_config()
-    c_cyan(f"Использую конфиг Xray: {xray_config_path}")
-    config = load_json(xray_config_path)
+    creds = None
+    traffic_pattern = None
+    try:
+        xray_config_path = Path(args.xray_config) if args.xray_config else find_xray_config()
+        c_cyan(f"Использую конфиг Xray: {xray_config_path}")
+        config = load_json(xray_config_path)
 
-    target = pick_target_inbound(config, args.port, args.inbound_tag)
+        target = pick_target_inbound(config, args.port, args.inbound_tag)
 
-    # ── выбор портов Mieru: явные флаги > интерактивный выбор > дефолты ──
-    want_tcp = args.transport in ("tcp", "both")
-    want_udp = args.transport in ("udp", "both")
+        # ── выбор портов Mieru: явные флаги > интерактивный выбор > дефолты ──
+        want_tcp = args.transport in ("tcp", "both")
+        want_udp = args.transport in ("udp", "both")
 
-    tcp_port = args.mieru_tcp_port if args.mieru_tcp_port is not None else args.port
-    udp_port = args.mieru_udp_port if args.mieru_udp_port is not None else args.port + 1
+        tcp_port = args.mieru_tcp_port if args.mieru_tcp_port is not None else args.port
+        udp_port = args.mieru_udp_port if args.mieru_udp_port is not None else args.port + 1
 
-    if not args.yes and not args.dry_run:
-        print()
-        c_cyan("Выбор портов для Mieru (Enter — оставить значение по умолчанию):")
-        taken = set()
-        if want_tcp:
-            if args.mieru_tcp_port is None:
-                tcp_port = ask_port("  TCP-порт Mieru", tcp_port, taken=taken)
-            taken.add(tcp_port)
+        if not args.yes and not args.dry_run:
+            _box_row()
+            c_cyan("Выбор портов для Mieru (Enter — оставить значение по умолчанию):")
+            taken = set()
+            if want_tcp:
+                if args.mieru_tcp_port is None:
+                    tcp_port = ask_port("  TCP-порт Mieru", tcp_port, taken=taken)
+                taken.add(tcp_port)
+            if want_udp:
+                if args.mieru_udp_port is None:
+                    udp_port = ask_port("  UDP-порт Mieru", udp_port, taken=taken)
+                taken.add(udp_port)
+
+        if want_tcp and want_udp and tcp_port == udp_port:
+            die(f"TCP- и UDP-порт совпадают ({tcp_port}) — это разные транспорты, "
+                f"но порту всё равно нужно быть разным, чтобы не путаться. Укажи "
+                f"--mieru-tcp-port / --mieru-udp-port явно.")
+
+        # ── ранняя проверка UDP-порта: он не зависит от текущего Xray, можно
+        #    проверить прямо сейчас, ДО каких-либо изменений ──
         if want_udp:
-            if args.mieru_udp_port is None:
-                udp_port = ask_port("  UDP-порт Mieru", udp_port, taken=taken)
-            taken.add(udp_port)
+            occupied, detail = check_port_listening(udp_port, "udp")
+            if occupied:
+                die(f"UDP-порт {udp_port} уже занят:\n  {detail}\n"
+                    f"  Выбери другой через --mieru-udp-port (ничего ещё не менялось).")
 
-    if want_tcp and want_udp and tcp_port == udp_port:
-        die(f"TCP- и UDP-порт совпадают ({tcp_port}) — это разные транспорты, "
-            f"но порту всё равно нужно быть разным, чтобы не путаться. Укажи "
-            f"--mieru-tcp-port / --mieru-udp-port явно.")
+        c_cyan(f"Итоговые порты Mieru: "
+               f"{f'TCP={tcp_port} ' if want_tcp else ''}{f'UDP={udp_port}' if want_udp else ''}")
 
-    # ── ранняя проверка UDP-порта: он не зависит от текущего Xray, можно
-    #    проверить прямо сейчас, ДО каких-либо изменений ──
-    if want_udp:
-        occupied, detail = check_port_listening(udp_port, "udp")
-        if occupied:
-            die(f"UDP-порт {udp_port} уже занят:\n  {detail}\n"
-                f"  Выбери другой через --mieru-udp-port (ничего ещё не менялось).")
+        if args.dry_run:
+            c_cyan("Dry-run: изменений не делаю, это была только диагностика.")
+            return
 
-    c_cyan(f"Итоговые порты Mieru: "
-           f"{f'TCP={tcp_port} ' if want_tcp else ''}{f'UDP={udp_port}' if want_udp else ''}")
+        _box_row()
+        c_yellow("Будет изменено: указанный inbound станет SOCKS-петлёй на 127.0.0.1:"
+                 f"{LOOPBACK_SOCKS_PORT}, протокол сменится с vless на socks.")
+        c_yellow("Внешний доступ по старому VLESS-линку на этом порту ПЕРЕСТАНЕТ работать "
+                 "— вместо него будет доступ через Mieru.")
+        if not args.yes and not confirm("Продолжить?"):
+            c_cyan("Отменено пользователем, ничего не тронуто.")
+            return
 
-    if args.dry_run:
-        c_cyan("Dry-run: изменений не делаю, это была только диагностика.")
-        return
+        backup_path, owner_mode = backup_config(xray_config_path)
+        original_inbound = convert_inbound_to_socks_loopback(target)
 
-    print()
-    c_yellow("Будет изменено: указанный inbound станет SOCKS-петлёй на 127.0.0.1:"
-             f"{LOOPBACK_SOCKS_PORT}, протокол сменится с vless на socks.")
-    c_yellow("Внешний доступ по старому VLESS-линку на этом порту ПЕРЕСТАНЕТ работать "
-             "— вместо него будет доступ через Mieru.")
-    if not args.yes and not confirm("Продолжить?"):
-        c_cyan("Отменено пользователем, ничего не тронуто.")
-        return
+        if not apply_xray_change(xray_config_path, config, backup_path, owner_mode):
+            die("Установка прервана на шаге Xray — Mieru НЕ устанавливался, прод не тронут "
+                "(или уже автоматически восстановлен).")
 
-    backup_path, owner_mode = backup_config(xray_config_path)
-    original_inbound = convert_inbound_to_socks_loopback(target)
+        # ── теперь, когда Xray уже освободил порт, проверяем TCP ещё раз:
+        #    если порт всё равно занят — значит, его перехватил кто-то ещё, и
+        #    нужно откатить Xray, чтобы не остаться вообще без входа ──
+        if want_tcp:
+            occupied, detail = check_port_listening(tcp_port, "tcp")
+            if occupied:
+                c_red(f"TCP-порт {tcp_port} занят чем-то ещё после освобождения Xray:\n  {detail}")
+                c_yellow("Откатываю Xray обратно, чтобы не остаться без входа вообще...")
+                shutil.copy2(backup_path, xray_config_path)
+                _restore_owner_mode(xray_config_path, owner_mode)
+                restart_service("xray")
+                die("Установка прервана — старый VLESS-инбаунд восстановлен. "
+                    "Разберись, что заняло порт, и попробуй снова.")
 
-    if not apply_xray_change(xray_config_path, config, backup_path, owner_mode):
-        die("Установка прервана на шаге Xray — Mieru НЕ устанавливался, прод не тронут "
-            "(или уже автоматически восстановлен).")
+        install_mita()
 
-    # ── теперь, когда Xray уже освободил порт, проверяем TCP ещё раз:
-    #    если порт всё равно занят — значит, его перехватил кто-то ещё, и
-    #    нужно откатить Xray, чтобы не остаться вообще без входа ──
-    if want_tcp:
-        occupied, detail = check_port_listening(tcp_port, "tcp")
-        if occupied:
-            c_red(f"TCP-порт {tcp_port} занят чем-то ещё после освобождения Xray:\n  {detail}")
-            c_yellow("Откатываю Xray обратно, чтобы не остаться без входа вообще...")
+        # --yes без явного --traffic-pattern означает «не спрашивать ничего
+        # интерактивно» — тогда тихо берём Basic (тот же режим, что и Enter).
+        effective_tp_mode = "basic" if (args.yes and args.traffic_pattern is None) else args.traffic_pattern
+        traffic_pattern = _ask_traffic_pattern_mode(effective_tp_mode)
+
+        mita_config, creds = build_mita_config(args.transport, tcp_port, udp_port,
+                                                traffic_pattern=traffic_pattern)
+
+        if not apply_mita_config(mita_config):
+            c_red("Mieru не поднялся с новым конфигом. Откатываю Xray, чтобы не остаться без входа вообще.")
             shutil.copy2(backup_path, xray_config_path)
             _restore_owner_mode(xray_config_path, owner_mode)
             restart_service("xray")
-            die("Установка прервана — старый VLESS-инбаунд восстановлен. "
-                "Разберись, что заняло порт, и попробуй снова.")
+            die("Установка прервана — старый VLESS-инбаунд восстановлен, Mieru не используется.")
 
-    install_mita()
+        fw = detect_firewall()
+        c_cyan(f"Файрвол: {fw}")
+        firewall_rollback = []
+        if want_tcp:
+            firewall_rollback.append(open_port(fw, tcp_port, "tcp"))
+        if want_udp:
+            firewall_rollback.append(open_port(fw, udp_port, "udp"))
 
-    # --yes без явного --traffic-pattern означает «не спрашивать ничего
-    # интерактивно» — тогда тихо берём Basic (тот же режим, что и Enter).
-    effective_tp_mode = "basic" if (args.yes and args.traffic_pattern is None) else args.traffic_pattern
-    traffic_pattern = _ask_traffic_pattern_mode(effective_tp_mode)
+        c_cyan("Проверяю локальный SOCKS-мост (Xray)...")
+        if selftest_socks5():
+            c_green("SOCKS5-мост на 127.0.0.1:1080 отвечает корректно.")
+        else:
+            c_yellow("SOCKS5-мост не ответил как ожидалось — не критично для установки, "
+                     "но стоит проверить логи Xray, прежде чем давать ссылку клиентам.")
 
-    mita_config, creds = build_mita_config(args.transport, tcp_port, udp_port,
-                                            traffic_pattern=traffic_pattern)
+        save_state({
+            "xray_config_path": str(xray_config_path),
+            "backup_path": str(backup_path),
+            "config_owner_mode": owner_mode,
+            "inbound_tag": original_inbound.get("tag"),
+            "firewall_rollback": firewall_rollback,
+            "transport": args.transport,
+            "tcp_port": tcp_port if want_tcp else None,
+            "udp_port": udp_port if want_udp else None,
+            "created": datetime.now().isoformat(),
+        })
+    finally:
+        # Рамка "УСТАНОВКА" закрывается всегда — при early return (dry-run,
+        # отмена, конфликт портов), при die()/sys.exit() на любом шаге, и
+        # при обычном успешном проходе — перед тем как print_summary()
+        # откроет СВОЮ отдельную рамку "ГОТОВО".
+        _box_bottom()
 
-    if not apply_mita_config(mita_config):
-        c_red("Mieru не поднялся с новым конфигом. Откатываю Xray, чтобы не остаться без входа вообще.")
-        shutil.copy2(backup_path, xray_config_path)
-        _restore_owner_mode(xray_config_path, owner_mode)
-        restart_service("xray")
-        die("Установка прервана — старый VLESS-инбаунд восстановлен, Mieru не используется.")
-
-    fw = detect_firewall()
-    c_cyan(f"Файрвол: {fw}")
-    firewall_rollback = []
-    if want_tcp:
-        firewall_rollback.append(open_port(fw, tcp_port, "tcp"))
-    if want_udp:
-        firewall_rollback.append(open_port(fw, udp_port, "udp"))
-
-    c_cyan("Проверяю локальный SOCKS-мост (Xray)...")
-    if selftest_socks5():
-        c_green("SOCKS5-мост на 127.0.0.1:1080 отвечает корректно.")
-    else:
-        c_yellow("SOCKS5-мост не ответил как ожидалось — не критично для установки, "
-                 "но стоит проверить логи Xray, прежде чем давать ссылку клиентам.")
-
-    save_state({
-        "xray_config_path": str(xray_config_path),
-        "backup_path": str(backup_path),
-        "config_owner_mode": owner_mode,
-        "inbound_tag": original_inbound.get("tag"),
-        "firewall_rollback": firewall_rollback,
-        "transport": args.transport,
-        "tcp_port": tcp_port if want_tcp else None,
-        "udp_port": udp_port if want_udp else None,
-        "created": datetime.now().isoformat(),
-    })
+    if creds is None:
+        return  # dry-run / отмена пользователем — до print_summary не дошли
 
     print_summary(creds)
     _print_traffic_pattern_snippet(traffic_pattern)
@@ -1027,134 +1313,145 @@ def _menu_install(default_port: int = 443) -> None:
     и без падения всего процесса при die() на промежуточных шагах."""
     box_header("MIERU HYBRID ADDON — УСТАНОВКА")
 
-    raw = input(f"Текущий внешний порт VLESS-инбаунда, который нужно освободить [{default_port}]: ").strip()
-    port = int(raw) if raw.isdigit() and 1 <= int(raw) <= 65535 else default_port
-
-    print()
-    c_cyan("Транспорт Mieru: 1) both (по умолчанию)  2) tcp  3) udp")
-    t_raw = input("Выбор [1]: ").strip()
-    transport = {"2": "tcp", "3": "udp"}.get(t_raw, "both")
-
+    creds = None
+    traffic_pattern = None
     try:
-        xray_config_path = find_xray_config()
-        c_cyan(f"Использую конфиг Xray: {xray_config_path}")
-        config = load_json(xray_config_path)
-        target = pick_target_inbound(config, port, None)
-    except SystemExit:
-        c_red("Установка прервана на шаге поиска конфигурации Xray (см. сообщение выше). "
-              "Ничего не изменено.")
-        return
+        raw = input(f"Текущий внешний порт VLESS-инбаунда, который нужно освободить [{default_port}]: ").strip()
+        port = int(raw) if raw.isdigit() and 1 <= int(raw) <= 65535 else default_port
 
-    want_tcp = transport in ("tcp", "both")
-    want_udp = transport in ("udp", "both")
-    tcp_port = port
-    udp_port = port + 1
+        _box_row()
+        c_cyan("Транспорт Mieru: 1) both (по умолчанию)  2) tcp  3) udp")
+        t_raw = input("Выбор [1]: ").strip()
+        transport = {"2": "tcp", "3": "udp"}.get(t_raw, "both")
 
-    print()
-    c_cyan("Выбор портов для Mieru (Enter — оставить значение по умолчанию):")
-    taken = set()
-    if want_tcp:
-        tcp_port = ask_port("  TCP-порт Mieru", tcp_port, taken=taken)
-        taken.add(tcp_port)
-    if want_udp:
-        udp_port = ask_port("  UDP-порт Mieru", udp_port, taken=taken)
-        taken.add(udp_port)
-
-    if want_tcp and want_udp and tcp_port == udp_port:
-        c_red(f"TCP- и UDP-порт совпадают ({tcp_port}) — это разные транспорты, но порту "
-              f"всё равно нужно быть разным. Установка отменена, ничего не изменено.")
-        return
-
-    if want_udp:
-        occupied, detail = check_port_listening(udp_port, "udp")
-        if occupied:
-            c_red(f"UDP-порт {udp_port} уже занят:\n  {detail}\n"
-                  f"  Выбери другой при повторном запуске. Ничего не изменено.")
+        try:
+            xray_config_path = find_xray_config()
+            c_cyan(f"Использую конфиг Xray: {xray_config_path}")
+            config = load_json(xray_config_path)
+            target = pick_target_inbound(config, port, None)
+        except SystemExit:
+            c_red("Установка прервана на шаге поиска конфигурации Xray (см. сообщение выше). "
+                  "Ничего не изменено.")
             return
 
-    c_cyan(f"Итоговые порты Mieru: "
-           f"{f'TCP={tcp_port} ' if want_tcp else ''}{f'UDP={udp_port}' if want_udp else ''}")
+        want_tcp = transport in ("tcp", "both")
+        want_udp = transport in ("udp", "both")
+        tcp_port = port
+        udp_port = port + 1
 
-    print()
-    c_yellow("Будет изменено: указанный inbound станет SOCKS-петлёй на 127.0.0.1:"
-             f"{LOOPBACK_SOCKS_PORT}, протокол сменится с vless на socks.")
-    c_yellow("Внешний доступ по старому VLESS-линку на этом порту ПЕРЕСТАНЕТ работать "
-             "— вместо него будет доступ через Mieru.")
-    if not confirm("Продолжить?"):
-        c_cyan("Отменено пользователем, ничего не тронуто.")
-        return
-
-    try:
-        backup_path, owner_mode = backup_config(xray_config_path)
-        original_inbound = convert_inbound_to_socks_loopback(target)
-
-        if not apply_xray_change(xray_config_path, config, backup_path, owner_mode):
-            c_red("Установка прервана на шаге Xray — Mieru НЕ устанавливался, прод не тронут "
-                  "(или уже автоматически восстановлен).")
-            return
-
+        _box_row()
+        c_cyan("Выбор портов для Mieru (Enter — оставить значение по умолчанию):")
+        taken = set()
         if want_tcp:
-            occupied, detail = check_port_listening(tcp_port, "tcp")
+            tcp_port = ask_port("  TCP-порт Mieru", tcp_port, taken=taken)
+            taken.add(tcp_port)
+        if want_udp:
+            udp_port = ask_port("  UDP-порт Mieru", udp_port, taken=taken)
+            taken.add(udp_port)
+
+        if want_tcp and want_udp and tcp_port == udp_port:
+            c_red(f"TCP- и UDP-порт совпадают ({tcp_port}) — это разные транспорты, но порту "
+                  f"всё равно нужно быть разным. Установка отменена, ничего не изменено.")
+            return
+
+        if want_udp:
+            occupied, detail = check_port_listening(udp_port, "udp")
             if occupied:
-                c_red(f"TCP-порт {tcp_port} занят чем-то ещё после освобождения Xray:\n  {detail}")
-                c_yellow("Откатываю Xray обратно, чтобы не остаться без входа вообще...")
+                c_red(f"UDP-порт {udp_port} уже занят:\n  {detail}\n"
+                      f"  Выбери другой при повторном запуске. Ничего не изменено.")
+                return
+
+        c_cyan(f"Итоговые порты Mieru: "
+               f"{f'TCP={tcp_port} ' if want_tcp else ''}{f'UDP={udp_port}' if want_udp else ''}")
+
+        _box_row()
+        c_yellow("Будет изменено: указанный inbound станет SOCKS-петлёй на 127.0.0.1:"
+                 f"{LOOPBACK_SOCKS_PORT}, протокол сменится с vless на socks.")
+        c_yellow("Внешний доступ по старому VLESS-линку на этом порту ПЕРЕСТАНЕТ работать "
+                 "— вместо него будет доступ через Mieru.")
+        if not confirm("Продолжить?"):
+            c_cyan("Отменено пользователем, ничего не тронуто.")
+            return
+
+        try:
+            backup_path, owner_mode = backup_config(xray_config_path)
+            original_inbound = convert_inbound_to_socks_loopback(target)
+
+            if not apply_xray_change(xray_config_path, config, backup_path, owner_mode):
+                c_red("Установка прервана на шаге Xray — Mieru НЕ устанавливался, прод не тронут "
+                      "(или уже автоматически восстановлен).")
+                return
+
+            if want_tcp:
+                occupied, detail = check_port_listening(tcp_port, "tcp")
+                if occupied:
+                    c_red(f"TCP-порт {tcp_port} занят чем-то ещё после освобождения Xray:\n  {detail}")
+                    c_yellow("Откатываю Xray обратно, чтобы не остаться без входа вообще...")
+                    shutil.copy2(backup_path, xray_config_path)
+                    _restore_owner_mode(xray_config_path, owner_mode)
+                    restart_service("xray")
+                    c_red("Установка прервана — старый VLESS-инбаунд восстановлен.")
+                    return
+
+            install_mita()
+
+            traffic_pattern = _ask_traffic_pattern_mode()  # в меню флага нет — всегда интерактив
+
+            mita_config, mita_creds = build_mita_config(transport, tcp_port, udp_port,
+                                                          traffic_pattern=traffic_pattern)
+
+            if not apply_mita_config(mita_config):
+                c_red("Mieru не поднялся с новым конфигом. Откатываю Xray, чтобы не остаться "
+                      "без входа вообще.")
                 shutil.copy2(backup_path, xray_config_path)
                 _restore_owner_mode(xray_config_path, owner_mode)
                 restart_service("xray")
-                c_red("Установка прервана — старый VLESS-инбаунд восстановлен.")
+                c_red("Установка прервана — старый VLESS-инбаунд восстановлен, Mieru не используется.")
                 return
 
-        install_mita()
+            fw = detect_firewall()
+            c_cyan(f"Файрвол: {fw}")
+            firewall_rollback = []
+            if want_tcp:
+                firewall_rollback.append(open_port(fw, tcp_port, "tcp"))
+            if want_udp:
+                firewall_rollback.append(open_port(fw, udp_port, "udp"))
 
-        traffic_pattern = _ask_traffic_pattern_mode()  # в меню флага нет — всегда интерактив
+            c_cyan("Проверяю локальный SOCKS-мост (Xray)...")
+            if selftest_socks5():
+                c_green("SOCKS5-мост на 127.0.0.1:1080 отвечает корректно.")
+            else:
+                c_yellow("SOCKS5-мост не ответил как ожидалось — не критично для установки, "
+                         "но стоит проверить логи Xray, прежде чем давать ссылку клиентам.")
 
-        mita_config, creds = build_mita_config(transport, tcp_port, udp_port,
-                                                traffic_pattern=traffic_pattern)
+            save_state({
+                "xray_config_path": str(xray_config_path),
+                "backup_path": str(backup_path),
+                "config_owner_mode": owner_mode,
+                "inbound_tag": original_inbound.get("tag"),
+                "firewall_rollback": firewall_rollback,
+                "transport": transport,
+                "tcp_port": tcp_port if want_tcp else None,
+                "udp_port": udp_port if want_udp else None,
+                "created": datetime.now().isoformat(),
+            })
+            creds = mita_creds  # сигнал «установка реально прошла» — для блока после finally
+        except SystemExit:
+            c_red("Установка прервана аддоном на одном из системных шагов (см. сообщение выше) — "
+                  "проверь руками, что прод не остался без входа.")
+    finally:
+        # Рамка "УСТАНОВКА" закрывается всегда (early return / SystemExit /
+        # обычный успех) — перед тем как print_summary() откроет СВОЮ рамку.
+        _box_bottom()
 
-        if not apply_mita_config(mita_config):
-            c_red("Mieru не поднялся с новым конфигом. Откатываю Xray, чтобы не остаться "
-                  "без входа вообще.")
-            shutil.copy2(backup_path, xray_config_path)
-            _restore_owner_mode(xray_config_path, owner_mode)
-            restart_service("xray")
-            c_red("Установка прервана — старый VLESS-инбаунд восстановлен, Mieru не используется.")
-            return
+    if creds is None:
+        return  # отмена / ошибка на одном из шагов — до print_summary не дошли
 
-        fw = detect_firewall()
-        c_cyan(f"Файрвол: {fw}")
-        firewall_rollback = []
-        if want_tcp:
-            firewall_rollback.append(open_port(fw, tcp_port, "tcp"))
-        if want_udp:
-            firewall_rollback.append(open_port(fw, udp_port, "udp"))
-
-        c_cyan("Проверяю локальный SOCKS-мост (Xray)...")
-        if selftest_socks5():
-            c_green("SOCKS5-мост на 127.0.0.1:1080 отвечает корректно.")
-        else:
-            c_yellow("SOCKS5-мост не ответил как ожидалось — не критично для установки, "
-                     "но стоит проверить логи Xray, прежде чем давать ссылку клиентам.")
-
-        save_state({
-            "xray_config_path": str(xray_config_path),
-            "backup_path": str(backup_path),
-            "config_owner_mode": owner_mode,
-            "inbound_tag": original_inbound.get("tag"),
-            "firewall_rollback": firewall_rollback,
-            "transport": transport,
-            "tcp_port": tcp_port if want_tcp else None,
-            "udp_port": udp_port if want_udp else None,
-            "created": datetime.now().isoformat(),
-        })
-
-        print_summary(creds)
-        _print_traffic_pattern_snippet(traffic_pattern)
-        traffic_pattern_blob = _export_traffic_pattern_blob() if traffic_pattern else None
-        _show_mieru_client_links(creds, get_public_ip(), traffic_pattern_blob=traffic_pattern_blob)
-        _log("SUCCESS", "hybrid_addon установлен успешно (через меню установщика)")
-    except SystemExit:
-        c_red("Установка прервана аддоном на одном из системных шагов (см. сообщение выше) — "
-              "проверь руками, что прод не остался без входа.")
+    print_summary(creds)
+    _print_traffic_pattern_snippet(traffic_pattern)
+    traffic_pattern_blob = _export_traffic_pattern_blob() if traffic_pattern else None
+    _show_mieru_client_links(creds, get_public_ip(), traffic_pattern_blob=traffic_pattern_blob)
+    _log("SUCCESS", "hybrid_addon установлен успешно (через меню установщика)")
 
 
 def _show_mieru_client_links(creds: dict, server_ip: str, traffic_pattern_blob: str = None) -> None:
@@ -1201,14 +1498,6 @@ def _show_mieru_client_links(creds: dict, server_ip: str, traffic_pattern_blob: 
             share_link = f"{share_link}&{tp_param}"
             share_link_neko = f"{share_link_neko}&{tp_param}"
 
-        print()
-        c_cyan(f"Клиентская выдача — {proto}:")
-        print(f"  {BOLD}Ссылка для Karing (sing-box core):{NC}")
-        print(f"  {YELLOW}{share_link}{NC}")
-        print()
-        print(f"  {BOLD}Ссылка для Nekobox / Nyamebox:{NC}")
-        print(f"  {YELLOW}{share_link_neko}{NC}")
-
         outbound = _gen_singbox_outbound(server_ip, port, port, proto, login, password)
         if traffic_pattern_blob:
             # ВНИМАНИЕ: имя поля "traffic_pattern" — по конвенции именования sing-box
@@ -1228,12 +1517,22 @@ def _show_mieru_client_links(creds: dict, server_ip: str, traffic_pattern_blob: 
             "route": {"final": outbound["tag"]},
         }
         cfg_path = Path(f"/tmp/karing-mieru-hybrid-{transport}-{login}.json")
+
+        box_header(f"КЛИЕНТСКАЯ ВЫДАЧА — {proto}")
         try:
-            cfg_path.write_text(json.dumps(full_config, indent=2, ensure_ascii=False), encoding="utf-8")
-            print()
-            c_yellow(f"mierus:// НЕ работает в Karing — для него файл: {cfg_path}")
-        except OSError as e:
-            c_red(f"Не удалось сохранить JSON-конфиг для Karing: {e}")
+            _box_row(f"  {BOLD}Ссылка для Karing (sing-box core):{NC}")
+            _box_link(share_link)
+            _box_row()
+            _box_row(f"  {BOLD}Ссылка для Nekobox / Nyamebox:{NC}")
+            _box_link(share_link_neko)
+            _box_row()
+            try:
+                cfg_path.write_text(json.dumps(full_config, indent=2, ensure_ascii=False), encoding="utf-8")
+                c_yellow(f"mierus:// НЕ работает в Karing — для него файл: {cfg_path}")
+            except OSError as e:
+                c_red(f"Не удалось сохранить JSON-конфиг для Karing: {e}")
+        finally:
+            _box_bottom()
 
         _print_qr(share_link, f"Karing / mierus:// ({proto})")
 
@@ -1251,7 +1550,7 @@ def do_hybrid_addon_menu(default_port: int = 443) -> None:
         os.system("clear")
         st = _menu_status()
         box_header("MIERU HYBRID ADDON")
-        print()
+        _box_row()
         if st.get("installed"):
             transport = st.get("transport", "?")
             tcp_p = st.get("tcp_port")
@@ -1259,16 +1558,18 @@ def do_hybrid_addon_menu(default_port: int = 443) -> None:
             ports = ", ".join(
                 p for p in (f"TCP={tcp_p}" if tcp_p else "", f"UDP={udp_p}" if udp_p else "") if p
             )
-            print(f"  {BOLD}Статус:{NC} {GREEN}установлен{NC}")
-            print(f"  Транспорт: {transport}   Порты: {ports}")
-            print()
-            print(f"  {CYAN}1{NC}  Откатить  {DIM}(восстановить исходный VLESS-инбаунд){NC}")
+            _box_kv("Статус:", f"{GREEN}установлен{NC}")
+            _box_kv("Транспорт:", transport)
+            _box_kv("Порты:", ports)
+            _box_row()
+            _box_item("1", f"Откатить  {DIM}(восстановить исходный VLESS-инбаунд){NC}")
         else:
-            print(f"  {BOLD}Статус:{NC} {DIM}не установлен{NC}")
-            print()
-            print(f"  {CYAN}1{NC}  Установить")
-        print(f"  {DIM}0  Назад{NC}")
-        print()
+            _box_kv("Статус:", f"{DIM}не установлен{NC}")
+            _box_row()
+            _box_item("1", "Установить")
+        _box_item("0", "Назад")
+        _box_bottom()
+
         try:
             ch = input(f"{CYAN}Выбор:{NC} ").strip()
         except (EOFError, KeyboardInterrupt):
@@ -1284,5 +1585,7 @@ def do_hybrid_addon_menu(default_port: int = 443) -> None:
         elif ch == "0" or ch == "":
             return
         else:
-            c_red(f"Неверный выбор: {ch}")
+            # После _box_bottom() рамка уже закрыта — печатаем как обычный
+            # print, не через c_red (та же конвенция, что в do_mieru_menu()).
+            print(f"  {RED}✗{NC}  Неверный выбор: {ch}")
             time.sleep(1)
