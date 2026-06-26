@@ -34,6 +34,7 @@ import sys
 import tempfile
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 from datetime import datetime
 from pathlib import Path
@@ -471,8 +472,14 @@ def gen_credentials() -> tuple:
     return login, password
 
 
-def build_mita_config(transport: str, tcp_port: int, udp_port: int) -> tuple:
-    """Возвращает (config_dict, creds_dict) — creds для финального вывода пользователю."""
+def build_mita_config(transport: str, tcp_port: int, udp_port: int,
+                       traffic_pattern: dict = None) -> tuple:
+    """Возвращает (config_dict, creds_dict) — creds для финального вывода пользователю.
+
+    traffic_pattern — опциональный dict для серверного поля trafficPattern
+    (настоящий JSON по docs/traffic-pattern.md, см. _traffic_pattern_*() и
+    _ask_traffic_pattern_mode()). None (по умолчанию) — поведение не меняется,
+    старые вызовы без этого параметра работают как раньше."""
     port_bindings = []
     users = []
     creds = {}
@@ -512,7 +519,150 @@ def build_mita_config(transport: str, tcp_port: int, udp_port: int) -> tuple:
             ],
         },
     }
+    if traffic_pattern:
+        config["trafficPattern"] = traffic_pattern
     return config, creds
+
+
+# ───────────────────────── Traffic Obfuscation (trafficPattern) ─────────────────────────
+# Формат ниже — НАСТОЯЩИЙ JSON по docs/traffic-pattern.md (enfein/mieru), для серверного
+# config.json mita. ВАЖНО: это НЕ то же самое, что значение traffic-pattern= в клиентской
+# mierus://-ссылке или в sing-box JSON для Karing — там нужен base64 PROTOBUF-блок,
+# который mita/mieru сами умеют выгружать командой `export traffic-pattern`, но руками
+# из этого dict его не получить. Поэтому для клиентской выдачи используется
+# _export_traffic_pattern_blob() — см. вызов после успешного apply_mita_config().
+#
+# multiplexing сюда НЕ входит — это отдельное, не вложенное поле, и оно уже корректно
+# выставлено отдельно в modules/mieru.py (_gen_singbox_outbound/_gen_client_share_link).
+# В серверном trafficPattern multiplexing не существует вообще.
+
+def _traffic_pattern_basic() -> dict:
+    return {
+        "nonce": {"type": "NONCE_TYPE_PRINTABLE"},
+    }
+
+
+def _traffic_pattern_aggressive() -> dict:
+    return {
+        "nonce": {"type": "NONCE_TYPE_PRINTABLE"},
+        # enable обязателен — по умолчанию False, без него maxSleepMs ни на что не влияет
+        "tcpFragment": {"enable": True, "maxSleepMs": 5},
+    }
+
+
+def _read_multiline_json() -> str:
+    """Читает строки, пока не встретит пустую (после хотя бы одной непустой) —
+    так можно вставить и однострочный, и красиво отформатированный JSON.
+    Возвращает None при EOF без единой накопленной строки (иначе при разорванном
+    stdin/Ctrl+D вызывающий код мог бы уйти в бесконечный повторный запрос)."""
+    lines = []
+    while True:
+        try:
+            line = input()
+        except EOFError:
+            return "\n".join(lines) if lines else None
+        if line.strip() == "":
+            if lines:
+                break
+            continue  # пустые строки до начала ввода пропускаем
+        lines.append(line)
+    return "\n".join(lines)
+
+
+def _traffic_pattern_custom() -> dict:
+    while True:
+        print()
+        c_cyan("Paste trafficPattern JSON (пустая строка — завершить ввод):")
+        raw = _read_multiline_json()
+        if raw is None:
+            c_yellow("Ввод прервался (EOF) без JSON — беру Basic по умолчанию.")
+            return _traffic_pattern_basic()
+        if not raw.strip():
+            c_yellow("Пустой ввод — вставь JSON-объект ещё раз.")
+            continue
+        try:
+            parsed = json.loads(raw)
+        except json.JSONDecodeError as e:
+            c_red(f"Невалидный JSON: {e}. Вставь ещё раз.")
+            continue
+        if not isinstance(parsed, dict):
+            c_red("Корнем должен быть JSON-объект {...}, не список/строка/число. Вставь ещё раз.")
+            continue
+        c_green("JSON принят.")
+        return parsed
+
+
+def _ask_traffic_pattern_mode(cli_mode: str = None) -> dict:
+    """Возвращает dict для trafficPattern (см. _traffic_pattern_*()) либо None — отключено.
+
+    cli_mode — значение --traffic-pattern из argparse (только main()/CLI; для пути
+    через меню установщика всегда None, там этого флага нет, только интерактив)."""
+    if cli_mode == "aggressive":
+        c_cyan("Traffic Obfuscation: Aggressive (флаг --traffic-pattern aggressive).")
+        return _traffic_pattern_aggressive()
+    if cli_mode == "basic":
+        c_cyan("Traffic Obfuscation: Basic (флаг --traffic-pattern basic).")
+        return _traffic_pattern_basic()
+    if cli_mode == "disabled":
+        c_cyan("Traffic Obfuscation: Disabled (флаг --traffic-pattern disabled).")
+        return None
+
+    print()
+    c_cyan("Traffic Obfuscation:")
+    print("  [1] Basic (Recommended)")
+    print("      nonce: NONCE_TYPE_PRINTABLE, tcpFragment: disabled")
+    print("  [2] Aggressive (для строгих DPI/ТСПУ-регионов)")
+    print("      nonce: NONCE_TYPE_PRINTABLE, tcpFragment: enabled (maxSleepMs=5)")
+    print("  [3] Custom — вставить свой JSON trafficPattern")
+    print("  [0] Disabled (без обфускации, как было раньше)")
+    choice = input("Выбор [1]: ").strip()
+
+    if choice in ("", "1"):
+        return _traffic_pattern_basic()
+    if choice == "2":
+        return _traffic_pattern_aggressive()
+    if choice == "3":
+        return _traffic_pattern_custom()
+    if choice == "0":
+        return None
+
+    c_yellow(f"Неизвестный выбор {choice!r} — беру Basic по умолчанию.")
+    return _traffic_pattern_basic()
+
+
+def _print_traffic_pattern_snippet(traffic_pattern: dict) -> None:
+    """Финальный вывод — клиентский JSON-сниппет trafficPattern (для документации/
+    ручного применения через `mieru apply config`). НЕ путать с base64-блоком
+    для ссылок/sing-box — тот выводится отдельно, см. _export_traffic_pattern_blob()."""
+    if not traffic_pattern:
+        return
+    print()
+    c_cyan("Traffic Obfuscation применён. Клиентский JSON-сниппет (trafficPattern):")
+    snippet = {"trafficPattern": traffic_pattern}
+    print(json.dumps(snippet, indent=2, ensure_ascii=False))
+
+
+def _export_traffic_pattern_blob() -> str:
+    """Вызывает `mita export traffic-pattern` на УЖЕ применённом конфиге и
+    возвращает base64-блок (значение для traffic-pattern= в ссылке и в
+    sing-box JSON). Возвращает None при любой проблеме — это не критичная
+    ошибка, остальная установка/выдача продолжается без этого поля."""
+    mita_bin = shutil.which("mita") or str(MITA_BIN)
+    if not Path(mita_bin).exists():
+        c_yellow("mita не найден — пропускаю экспорт traffic-pattern для клиентских ссылок.")
+        return None
+    r = run([mita_bin, "export", "traffic-pattern"])
+    if r.returncode != 0:
+        c_yellow(f"`mita export traffic-pattern` завершился с ошибкой: "
+                 f"{r.stderr.strip() or r.stdout.strip()}\n"
+                 f"  Ссылки/JSON будут без поля traffic-pattern.")
+        return None
+    blob = r.stdout.strip()
+    if not blob:
+        c_yellow("`mita export traffic-pattern` вернул пустой вывод — "
+                 "пропускаю поле в ссылках.")
+        return None
+    return blob
 
 
 def apply_mita_config(config: dict) -> bool:
@@ -703,6 +853,13 @@ def main() -> None:
                          help="Не спрашивать подтверждение и не предлагать выбор портов интерактивно")
     parser.add_argument("--rollback", action="store_true",
                          help="Откатить ранее применённые изменения")
+    parser.add_argument("--traffic-pattern", choices=["basic", "aggressive", "disabled"],
+                         default=None,
+                         help="Traffic Obfuscation для Mieru без интерактивного вопроса: "
+                              "basic (по умолчанию при --yes), aggressive (для строгого DPI/ТСПУ), "
+                              "disabled (без обфускации, как было раньше). Без флага — "
+                              "интерактивный вопрос (Enter = basic). Custom-режим (вставка "
+                              "своего JSON) доступен только интерактивно, без флага.")
     args = parser.parse_args()
 
     require_root()
@@ -791,7 +948,13 @@ def main() -> None:
 
     install_mita()
 
-    mita_config, creds = build_mita_config(args.transport, tcp_port, udp_port)
+    # --yes без явного --traffic-pattern означает «не спрашивать ничего
+    # интерактивно» — тогда тихо берём Basic (тот же режим, что и Enter).
+    effective_tp_mode = "basic" if (args.yes and args.traffic_pattern is None) else args.traffic_pattern
+    traffic_pattern = _ask_traffic_pattern_mode(effective_tp_mode)
+
+    mita_config, creds = build_mita_config(args.transport, tcp_port, udp_port,
+                                            traffic_pattern=traffic_pattern)
 
     if not apply_mita_config(mita_config):
         c_red("Mieru не поднялся с новым конфигом. Откатываю Xray, чтобы не остаться без входа вообще.")
@@ -828,6 +991,7 @@ def main() -> None:
     })
 
     print_summary(creds)
+    _print_traffic_pattern_snippet(traffic_pattern)
     _log("SUCCESS", "hybrid_addon установлен успешно")
 
 
@@ -942,7 +1106,10 @@ def _menu_install(default_port: int = 443) -> None:
 
         install_mita()
 
-        mita_config, creds = build_mita_config(transport, tcp_port, udp_port)
+        traffic_pattern = _ask_traffic_pattern_mode()  # в меню флага нет — всегда интерактив
+
+        mita_config, creds = build_mita_config(transport, tcp_port, udp_port,
+                                                traffic_pattern=traffic_pattern)
 
         if not apply_mita_config(mita_config):
             c_red("Mieru не поднялся с новым конфигом. Откатываю Xray, чтобы не остаться "
@@ -981,14 +1148,16 @@ def _menu_install(default_port: int = 443) -> None:
         })
 
         print_summary(creds)
-        _show_mieru_client_links(creds, get_public_ip())
+        _print_traffic_pattern_snippet(traffic_pattern)
+        traffic_pattern_blob = _export_traffic_pattern_blob() if traffic_pattern else None
+        _show_mieru_client_links(creds, get_public_ip(), traffic_pattern_blob=traffic_pattern_blob)
         _log("SUCCESS", "hybrid_addon установлен успешно (через меню установщика)")
     except SystemExit:
         c_red("Установка прервана аддоном на одном из системных шагов (см. сообщение выше) — "
               "проверь руками, что прод не остался без входа.")
 
 
-def _show_mieru_client_links(creds: dict, server_ip: str) -> None:
+def _show_mieru_client_links(creds: dict, server_ip: str, traffic_pattern_blob: str = None) -> None:
     """Доп. клиентская выдача (только для пути через меню установщика):
     mierus:// для Karing/sing-box, mierus:// для Nekobox, sing-box JSON
     для Karing (mierus:// в нём не работает — только JSON-файл) и QR.
@@ -999,6 +1168,12 @@ def _show_mieru_client_links(creds: dict, server_ip: str) -> None:
     как раньше не требует пакета vless_installer и работает чисто на
     stdlib — ломается только эта, чисто меню-шная надстройка, если
     что-то пойдёт не так, и то лишь с понятным предупреждением.
+
+    traffic_pattern_blob — base64-протобаф из _export_traffic_pattern_blob(),
+    НЕ JSON. Добавляется как есть в &traffic-pattern= (mierus://) и в поле
+    "traffic_pattern" sing-box JSON — генераторы из mieru.py при этом не
+    трогаем, просто дописываем параметр/поле к уже готовому результату.
+    None — поведение как раньше, без этого параметра/поля вообще.
     """
     try:
         from vless_installer.modules.mieru import (
@@ -1021,6 +1196,11 @@ def _show_mieru_client_links(creds: dict, server_ip: str) -> None:
         share_link = _gen_client_share_link(server_ip, port, port, proto, login, password)
         share_link_neko = _gen_client_share_link_nekobox(server_ip, port, proto, login, password)
 
+        if traffic_pattern_blob:
+            tp_param = f"traffic-pattern={urllib.parse.quote(traffic_pattern_blob, safe='')}"
+            share_link = f"{share_link}&{tp_param}"
+            share_link_neko = f"{share_link_neko}&{tp_param}"
+
         print()
         c_cyan(f"Клиентская выдача — {proto}:")
         print(f"  {BOLD}Ссылка для Karing (sing-box core):{NC}")
@@ -1030,6 +1210,12 @@ def _show_mieru_client_links(creds: dict, server_ip: str) -> None:
         print(f"  {YELLOW}{share_link_neko}{NC}")
 
         outbound = _gen_singbox_outbound(server_ip, port, port, proto, login, password)
+        if traffic_pattern_blob:
+            # ВНИМАНИЕ: имя поля "traffic_pattern" — по конвенции именования sing-box
+            # (snake_case, как server_port) и докам mihomo/sing-box ("base64 string,
+            # см. официальную документацию mieru"), но НЕ проверено живьём на Karing —
+            # стоит свериться на реальном клиенте при первом использовании.
+            outbound["traffic_pattern"] = traffic_pattern_blob
         full_config = {
             "log": {"level": "info"},
             "dns": {
