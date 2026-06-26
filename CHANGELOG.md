@@ -2,6 +2,77 @@
 
 ---
 
+## 🎭 Mieru Hybrid Addon: Traffic Obfuscation + рестайлинг визуала · Telemt: фикс персиста учёта трафика — 26 июня 2026
+
+### Добавлено
+
+**`vless_installer/modules/hybrid_addon.py` — Traffic Obfuscation (trafficPattern) для Mieru**
+
+К установке Mieru Hybrid Addon добавлен шаг выбора маскировки трафика на
+уровне протокола mieru (серверное поле `trafficPattern`, см.
+docs/traffic-pattern.md проекта enfein/mieru):
+
+  • **Basic (по умолчанию)** — `nonce: NONCE_TYPE_PRINTABLE`, без
+    `tcpFragment`;
+  • **Aggressive** — то же + `tcpFragment` с `maxSleepMs=5`, для регионов
+    со строгим DPI/ТСПУ;
+  • **Custom** — можно вставить собственный JSON `trafficPattern`
+    (с валидацией);
+  • **Disabled** — поведение как раньше, без обфускации.
+
+Доступно как в интерактивном меню (`Установить → Traffic Obfuscation`),
+так и через CLI-флаг `--traffic-pattern {basic,aggressive,disabled}`
+(при `--yes` без явного флага тихо берётся `basic`). Custom-режим
+доступен только интерактивно.
+
+Для клиентских ссылок (`mierus://`, sing-box JSON для Karing) сервер
+сам экспортирует протобаф-блок через `mita export traffic-pattern` —
+он добавляется как параметр `&traffic-pattern=` в ссылку и как поле
+`traffic_pattern` в sing-box outbound. Если экспорт не удался —
+выдача продолжается без этого поля, с предупреждением (не блокирует
+установку).
+
+### Изменено
+
+**`vless_installer/modules/hybrid_addon.py` — рестайлинг визуального движка**
+
+Переписан рендер боксов/сообщений в едином стиле остального
+установщика (`_box_top/_box_row/_box_sep/_box_item/_box_kv` и т.д.,
+по аналогии с `box_renderer` из `_core.py`):
+
+  • точная посимвольная ширина строк с учётом wide-символов
+    (CJK/эмодзи через `unicodedata.east_asian_width`) и игнорированием
+    zero-width/combining-кодов — раньше кириллица считалась как обычно,
+    но строки с китайскими иероглифами или эмодзи в кастомном
+    `trafficPattern`/выводе ломали выравнивание рамок;
+  • перенос длинных строк и слов по словам с переносом по символам,
+    если слово само шире доступной ширины бокса;
+  • единые хелперы для key-value строк (`_box_kv`) и для
+    цветных префиксов с переносом (`_box_wrap_msg`).
+
+Функционально на установку/откат Mieru Hybrid Addon это не влияет —
+изменился только визуальный вывод в терминале.
+
+### Исправлено
+
+**`vless_installer/modules/mtproto_stats.py` — учёт трафика Telemt не переживал ребут сервера**
+
+`setup_iptables_accounting()` создавал цепочки `TELEMT_STATS_IN/OUT`
+и джамп-правила в `INPUT`/`OUTPUT`, но никогда не сохранял их —
+в отличие от SYN-limiter и iOS-фикса, которые персистят свои правила
+явно. После рестарта сервера/обновления ядра правила учёта пропадали
+из runtime-таблицы iptables, и счётчики трафика обнулялись/перестают
+расти, хотя сама логика подсчёта (`_collect()`, `_read_chain_bytes()`)
+была корректна.
+
+Добавлена `_persist_accounting_rules()` — best-effort сохранение через
+`netfilter-persistent save`, либо `iptables-save` в
+`/etc/iptables/rules.v4`, вызывается сразу после применения правил
+учёта (как при установке, так и в пункте меню «Включить/
+переинициализировать учёт iptables»).
+
+---
+
 ## 🔀 Новый модуль: Mieru Hybrid Addon (маскировка VLESS-входа под Mieru) — 25 июня 2026
 
 ### Добавлено
