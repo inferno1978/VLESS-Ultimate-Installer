@@ -125,6 +125,14 @@ _STATE_FILE         = Path("/var/lib/xray-installer/state.json")
 WARP_SSH_NS_SERVICE  = Path("/etc/systemd/system/warp-ssh-ns.service")
 WARP_RUNET_CIDRS_URL = "https://raw.githubusercontent.com/runetfreedom/russia-v2ray-rules-dat/release/geoip.dat"
 
+# Файл с РЕАЛЬНЫМ (не-WARP) дефолтным маршрутом сервера, захваченным ДО того,
+# как WARP подключился и подменил собственный default route. Все сгенерированные
+# скрипты (warp-ssh-protect.sh, warp-runet.sh) ОБЯЗАНЫ читать шлюз отсюда, а не
+# пересчитывать `ip route show default` сами — иначе после подключения WARP
+# любой такой пересчёт поймает уже сам WARP вместо настоящего шлюза, и "защита"
+# от WARP начнёт сама маршрутизировать защищаемый трафик обратно в WARP.
+_ORIG_ROUTE_FILE = Path("/etc/warp-original-route.conf")
+
 
 # ── Вспомогательные функции ──────────────────────────────────────────────────
 
@@ -305,42 +313,64 @@ def _warp_create_ssh_namespace() -> bool:
     """
     _box_info("Настройка защиты SSH от WARP (iptables mark + маршрутизация)...")
 
+    orig = _load_original_route()
+    if orig is None:
+        _box_warn(
+            "Не найден сохранённый исходный шлюз (/etc/warp-original-route.conf) — "
+            "SSH-защита не настроена, чтобы не маршрутизировать SSH обратно в WARP. "
+            "Выполните `warp-cli disconnect`, перезапустите настройку WARP заново."
+        )
+        return False
+    orig_gw, orig_if = orig
+
     # Создаём скрипт защиты SSH
     ssh_protect_script = Path("/usr/local/bin/warp-ssh-protect.sh")
-    ssh_protect_script.write_text(textwrap.dedent("""\
+    ssh_protect_script.write_text(textwrap.dedent(f"""\
         #!/bin/bash
         # Защита SSH от WARP-туннеля
         # Помечаем пакеты SSH (порт 22) специальным fwmark и направляем
-        # их через основную таблицу маршрутизации, минуя WARP
+        # их через РЕАЛЬНЫЙ шлюз сервера, минуя WARP.
+        #
+        # ВАЖНО: MAIN_GW/MAIN_IF здесь — литералы, зафиксированные ДО подключения
+        # WARP (см. _capture_original_route() в warp.py), а не результат
+        # `ip route show default`, выполненного в момент запуска этого скрипта.
+        # Если WARP уже подключён в момент запуска, "текущий" дефолтный маршрут —
+        # это сам WARP, и пересчёт здесь привёл бы к тому, что SSH "защищали" бы
+        # маршрутом обратно в WARP (баг прошлых версий).
 
         set -euo pipefail
 
         SSH_PORT=22
-        WARP_FWMARK=2147483648  # 0x80000000 — метка WARP (стандартная)
         SSH_TABLE=222
+        MAIN_GW="{orig_gw}"
+        MAIN_IF="{orig_if}"
 
-        # Добавляем правило маршрутизации для SSH: пакеты с меткой НЕ от WARP
-        # идут через основную таблицу (не через WARP)
-        ip rule del fwmark ${SSH_TABLE} table ${SSH_TABLE} 2>/dev/null || true
-        ip rule add fwmark ${SSH_TABLE} table ${SSH_TABLE} priority 100
+        # Добавляем правило маршрутизации для SSH: пакеты с меткой идут через
+        # реальный шлюз сервера (table 222), не через WARP
+        ip rule del fwmark ${{SSH_TABLE}} table ${{SSH_TABLE}} 2>/dev/null || true
+        ip rule add fwmark ${{SSH_TABLE}} table ${{SSH_TABLE}} priority 100
 
-        # Очищаем таблицу и добавляем маршрут через основной шлюз
-        ip route flush table ${SSH_TABLE} 2>/dev/null || true
-        MAIN_GW=$(ip route show default | awk '/default/ {print $3; exit}')
-        MAIN_IF=$(ip route show default | awk '/default/ {print $5; exit}')
-        if [[ -n "$MAIN_GW" && -n "$MAIN_IF" ]]; then
-            ip route add default via ${MAIN_GW} dev ${MAIN_IF} table ${SSH_TABLE}
-        fi
+        ip route flush table ${{SSH_TABLE}} 2>/dev/null || true
+        ip route add default via ${{MAIN_GW}} dev ${{MAIN_IF}} table ${{SSH_TABLE}}
 
         # iptables: помечаем входящие соединения на 22-й порт меткой SSH_TABLE
-        iptables -t mangle -D OUTPUT -p tcp --sport ${SSH_PORT} -j MARK --set-mark ${SSH_TABLE} 2>/dev/null || true
-        iptables -t mangle -A OUTPUT -p tcp --sport ${SSH_PORT} -j MARK --set-mark ${SSH_TABLE}
+        iptables -t mangle -D OUTPUT -p tcp --sport ${{SSH_PORT}} -j MARK --set-mark ${{SSH_TABLE}} 2>/dev/null || true
+        iptables -t mangle -A OUTPUT -p tcp --sport ${{SSH_PORT}} -j MARK --set-mark ${{SSH_TABLE}}
 
         # Также для уже установленных соединений (ESTABLISHED)
-        iptables -t mangle -D OUTPUT -p tcp --sport ${SSH_PORT} -m conntrack --ctstate ESTABLISHED -j MARK --set-mark ${SSH_TABLE} 2>/dev/null || true
-        iptables -t mangle -A OUTPUT -p tcp --sport ${SSH_PORT} -m conntrack --ctstate ESTABLISHED -j MARK --set-mark ${SSH_TABLE}
+        iptables -t mangle -D OUTPUT -p tcp --sport ${{SSH_PORT}} -m conntrack --ctstate ESTABLISHED -j MARK --set-mark ${{SSH_TABLE}} 2>/dev/null || true
+        iptables -t mangle -A OUTPUT -p tcp --sport ${{SSH_PORT}} -m conntrack --ctstate ESTABLISHED -j MARK --set-mark ${{SSH_TABLE}}
 
-        echo "SSH protection rules applied (port ${SSH_PORT} bypasses WARP)"
+        # Самопроверка: если зафиксированный интерфейс сам оказался WARP
+        # (например, _ORIG_ROUTE_FILE протух после смены сети сервера) —
+        # не применяем правило, чтобы не молча завести SSH в WARP.
+        if echo "${{MAIN_IF}}" | grep -qi "warp"; then
+            echo "ОШИБКА: сохранённый интерфейс (${{MAIN_IF}}) похож на WARP — отказываюсь применять правило" >&2
+            ip rule del fwmark ${{SSH_TABLE}} table ${{SSH_TABLE}} 2>/dev/null || true
+            exit 1
+        fi
+
+        echo "SSH protection rules applied (port ${{SSH_PORT}} bypasses WARP via ${{MAIN_IF}})"
     """))
     ssh_protect_script.chmod(0o755)
 
@@ -400,6 +430,64 @@ def _warp_exclude_localhost() -> None:
         r = _warp_cli("split-tunnel", "ip", "add", cidr)
         if r.returncode != 0:
             _warp_cli("tunnel", "ip", "add-excluded", cidr)
+
+
+# ── Захват исходного (не-WARP) маршрута ──────────────────────────────────────
+
+def _capture_original_route() -> Optional[tuple[str, str]]:
+    """
+    Захватывает текущий дефолтный маршрут (шлюз + интерфейс) и сохраняет
+    в _ORIG_ROUTE_FILE. Вызывать ТОЛЬКО до подключения WARP — иначе вместо
+    настоящего шлюза будет захвачен сам WARP-интерфейс (см. комментарий
+    у _ORIG_ROUTE_FILE).
+
+    Возвращает (gw, iface) либо None, если определить не удалось или если
+    дефолтный маршрут уже сейчас идёт через WARP (значит вызвали слишком
+    поздно — в этом случае старый сохранённый файл (если есть) не трогаем).
+    """
+    r = _run(["ip", "route", "show", "default"], capture=True, check=False)
+    if r.returncode != 0 or not r.stdout.strip():
+        return None
+
+    for line in r.stdout.splitlines():
+        if "warp" in line.lower() or "CloudflareWARP" in line:
+            # Дефолтный маршрут уже подменён WARP — захватывать поздно,
+            # это и есть тот самый баг. Не пишем мусор в файл.
+            return None
+        parts = line.split()
+        if "via" in parts and "dev" in parts:
+            gw  = parts[parts.index("via") + 1]
+            dev = parts[parts.index("dev") + 1]
+            _ORIG_ROUTE_FILE.write_text(f"MAIN_GW={gw}\nMAIN_IF={dev}\n")
+            _ORIG_ROUTE_FILE.chmod(0o644)
+            return (gw, dev)
+    return None
+
+
+def _load_original_route() -> Optional[tuple[str, str]]:
+    """Читает ранее сохранённый РЕАЛЬНЫЙ шлюз из _ORIG_ROUTE_FILE."""
+    if not _ORIG_ROUTE_FILE.exists():
+        return None
+    gw = dev = None
+    for line in _ORIG_ROUTE_FILE.read_text().splitlines():
+        if line.startswith("MAIN_GW="):
+            gw = line.split("=", 1)[1].strip()
+        elif line.startswith("MAIN_IF="):
+            dev = line.split("=", 1)[1].strip()
+    return (gw, dev) if gw and dev else None
+
+
+def _ensure_original_route() -> Optional[tuple[str, str]]:
+    """
+    Гарантирует наличие сохранённого исходного маршрута: пробует захватить
+    свежий (на случай, если сеть сервера поменялась), и только если сейчас
+    захватить не получилось (например, WARP уже активен с прошлого запуска) —
+    откатывается на ранее сохранённый файл.
+    """
+    fresh = _capture_original_route()
+    if fresh:
+        return fresh
+    return _load_original_route()
 
 
 # ── Регистрация WARP ─────────────────────────────────────────────────────────
@@ -634,27 +722,41 @@ def _warp_configure_runet_mode(ssh_client_ip: str) -> None:
 
     # Создаём скрипт для динамического применения РФ-маршрутов
     # Используем ipset + iptables если доступен, иначе ip rule
+    orig = _load_original_route()
+    if orig is None:
+        _box_warn(
+            "Не найден сохранённый исходный шлюз (/etc/warp-original-route.conf) — "
+            "режим RuNet не настроен, чтобы не маршрутизировать SSH/РФ-трафик "
+            "обратно в WARP. Выполните `warp-cli disconnect` и повторите настройку."
+        )
+        return
+    orig_gw, orig_if = orig
+
     runet_script = Path("/usr/local/bin/warp-runet.sh")
     runet_script.write_text(textwrap.dedent(f"""\
         #!/bin/bash
         # WARP RuNet mode: российский трафик идёт напрямую, заблокированный — через WARP
         # Источник РФ IP: runetfreedom (те же списки что и split tunneling xray)
+        #
+        # ВАЖНО: MAIN_GW/MAIN_IF — литералы, зафиксированные ДО подключения WARP
+        # (см. _capture_original_route() в warp.py), НЕ результат живого
+        # `ip route show default` на момент запуска этого скрипта — иначе после
+        # подключения WARP "текущим" дефолтным маршрутом окажется сам WARP, и
+        # вся прямая/SSH-маршрутизация поедет обратно в WARP (старый баг).
         set -euo pipefail
 
         LOG="/var/log/warp-runet.log"
         echo "[$(date '+%Y-%m-%d %H:%M:%S')] Применение WARP RuNet маршрутов..." >> "$LOG"
 
         WARP_TABLE=223
-        MAIN_GW=$(ip route show default | awk '/default/ {{print $3; exit}}')
-        MAIN_IF=$(ip route show default | awk '/default/ {{print $5; exit}}')
+        MAIN_GW="{orig_gw}"
+        MAIN_IF="{orig_if}"
 
         # Таблица маршрутизации для прямого (не-WARP) трафика
-        ip rule del fwmark {WARP_TABLE} table {WARP_TABLE} 2>/dev/null || true
-        ip rule add fwmark {WARP_TABLE} table {WARP_TABLE} priority 50
-        ip route flush table {WARP_TABLE} 2>/dev/null || true
-        if [[ -n "$MAIN_GW" && -n "$MAIN_IF" ]]; then
-            ip route add default via "$MAIN_GW" dev "$MAIN_IF" table {WARP_TABLE}
-        fi
+        ip rule del fwmark {{WARP_TABLE}} table {{WARP_TABLE}} 2>/dev/null || true
+        ip rule add fwmark {{WARP_TABLE}} table {{WARP_TABLE}} priority 50
+        ip route flush table {{WARP_TABLE}} 2>/dev/null || true
+        ip route add default via "$MAIN_GW" dev "$MAIN_IF" table {{WARP_TABLE}}
 
         # Помечаем российские IP (известные диапазоны) для прямого маршрута
         # Используем iptables + ipset если доступен
@@ -695,8 +797,8 @@ def _warp_configure_runet_mode(ssh_client_ip: str) -> None:
                 213.180.0.0/15; do
                 ipset add warp-ru-direct "$CIDR" 2>/dev/null || true
             done
-            iptables -t mangle -D OUTPUT -m set --match-set warp-ru-direct dst -j MARK --set-mark {WARP_TABLE} 2>/dev/null || true
-            iptables -t mangle -A OUTPUT -m set --match-set warp-ru-direct dst -j MARK --set-mark {WARP_TABLE}
+            iptables -t mangle -D OUTPUT -m set --match-set warp-ru-direct dst -j MARK --set-mark {{WARP_TABLE}} 2>/dev/null || true
+            iptables -t mangle -A OUTPUT -m set --match-set warp-ru-direct dst -j MARK --set-mark {{WARP_TABLE}}
             echo "[$(date '+%Y-%m-%d %H:%M:%S')] ipset warp-ru-direct применён" >> "$LOG"
         else
             echo "[$(date '+%Y-%m-%d %H:%M:%S')] ipset недоступен, используем warp-cli exclude" >> "$LOG"
@@ -793,6 +895,22 @@ def configure_warp(
     _set_warp("WARP_SSH_CLIENT_IP", ssh_client_ip)
     _set_warp("WARP_CUSTOM_IPS", custom_ips or [])
     _set_warp("WARP_CUSTOM_DOMAINS", custom_domains or [])
+
+    # 0. КРИТИЧЕСКИ ВАЖНО: захватываем реальный (не-WARP) дефолтный маршрут
+    # СЕЙЧАС, до того как WARP вообще подключится. Если сделать это позже
+    # (как было раньше — внутри _warp_create_ssh_namespace()/runet-скрипта,
+    # уже ПОСЛЕ install_warp()+connect()), "захваченным" окажется сам
+    # WARP-интерфейс — и вся защита SSH/RuNet от WARP будет на самом деле
+    # маршрутизировать защищаемый трафик обратно в WARP. Именно это рубило
+    # SSH при любом сбое WARP в прошлых попытках.
+    if _ensure_original_route() is None:
+        _box_warn(
+            "Не удалось определить исходный (не-WARP) шлюз сервера — возможно, "
+            "WARP уже активен с предыдущего запуска. Защита SSH/режим RuNet "
+            "могут оказаться ненадёжными. Рекомендуется выполнить "
+            "`warp-cli disconnect`, перезапустить настройку, и только потом "
+            "снова подключать WARP."
+        )
 
     # 1. Установка
     if not install_warp():
