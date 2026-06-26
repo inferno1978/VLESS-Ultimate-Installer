@@ -23,6 +23,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 import time
@@ -184,6 +185,33 @@ def setup_iptables_accounting(port: int) -> None:
         CRON_FILE.chmod(0o644)
     except Exception:
         pass
+
+    # ── Persist ──────────────────────────────────────────────────────────────
+    # Без этого шага цепочки TELEMT_STATS_IN/OUT и джамп-правила в INPUT/OUTPUT
+    # живут только в runtime-таблице iptables и пропадают после любого ребута
+    # сервера (обновление ядра, рестарт VPS) — учёт трафика "перестаёт
+    # работать", хотя сам код _collect()/_read_chain_bytes() ни в чём не
+    # виноват. SYN-limiter и iOS-фикс уже сохраняют свои правила аналогично —
+    # учёт трафика был единственным исключением.
+    _persist_accounting_rules()
+
+def _persist_accounting_rules() -> None:
+    """
+    Сохраняет текущие iptables-правила (включая TELEMT_STATS_IN/OUT) тем же
+    best-effort способом, что используется в telemt_syn_limiter.py /
+    telemt_ios_fix.py: netfilter-persistent, либо iptables-save в rules.v4.
+    """
+    if shutil.which("netfilter-persistent"):
+        _run(["netfilter-persistent", "save"])
+        return
+    rules_path = Path("/etc/iptables/rules.v4")
+    if rules_path.parent.exists():
+        try:
+            r = _run(["iptables-save"], capture=True)
+            if r.returncode == 0 and r.stdout:
+                rules_path.write_text(r.stdout)
+        except Exception:
+            pass
 
 def _read_chain_bytes(chain: str) -> int:
     """
