@@ -27,13 +27,20 @@ _core.py импортирует `do_manage_warp` из этого модуля н
 _pkg_install(), STATE_FILE и сами глобали WARP_*. Поэтому ЛЮБОЙ top-level
 `from vless_installer._core import ...` в этом файле гарантированно упадёт
 с ImportError (partially initialized module) уже на старте инсталлятора.
+Решение — отложенное (lazy) разрешение имён ядра в момент фактического
+вызова через `_core_module()`, а не в момент импорта.
 
-Единственно верное решение — отложенное (lazy) разрешение имён ядра в
-момент фактического вызова, а не в момент импорта модуля. Поэтому ниже есть
-`_core_module()` и тонкие обёртки над ним. Это не заглушки и не дублирование
-логики ядра — настоящая реализация (чтение/запись state.json, логирование,
-command_exists, _pkg_install) целиком живёт в _core.py; здесь только
-отложенное связывание имён.
+ПОЛНАЯ АВТОНОМНОСТЬ: модуль НЕ требует никаких изменений в _core.py.
+Используются только то, что там уже реально есть и так: STATE_FILE,
+log_to_file(), command_exists(), _pkg_install(). Чтение/запись WARP_*
+состояния в state.json модуль выполняет полностью сам — см.
+_warp_state_load_autonomously() / _warp_state_save_autonomously() ниже —
+через явный маппинг JSON-ключ ⇄ имя глобали ядра (_WARP_STATE_MAP), а НЕ
+слепым сканированием vars(core): под префиксом WARP_ в _core.py помимо
+шести нужных ключей лежат WARP_MDM_FILE / WARP_SERVICE_FILE (Path-объекты,
+не сериализуются в JSON) и унаследованные от старого warp-cli SSH-namespace
+константы (WARP_SSH_NAMESPACE и т.п.) — слепой сбор всех WARP_*-атрибутов
+уронил бы json.dumps() и тихо проглотил ошибку сохранения на каждом вызове.
 ───────────────────────────────────────────────────────────────────────────────
 """
 from __future__ import annotations
@@ -103,6 +110,73 @@ def command_exists(cmd: str) -> bool:
 
 def _pkg_install(*pkgs: str) -> None:
     _core_module()._pkg_install(*pkgs)
+
+
+# =============================================================================
+#  АВТОНОМНАЯ ПЕРСИСТЕНТНОСТЬ WARP_* СОСТОЯНИЯ — без изменений в _core.py
+# =============================================================================
+# Явный маппинг JSON-ключ (state.json) ⇄ имя глобали ядра. НЕ простой
+# .upper()/.lower(): исторически "warp_ssh_ip" ⇄ "WARP_SSH_CLIENT_IP" (а не
+# "WARP_SSH_IP"). Маппинг также служит белым списком — иначе пришлось бы
+# слепо собирать все атрибуты ядра с префиксом WARP_, среди которых есть
+# несериализуемые Path-объекты (WARP_MDM_FILE, WARP_SERVICE_FILE) и мусор
+# от старого warp-cli SSH-namespace подхода (WARP_SSH_NAMESPACE и т.п.) —
+# см. подробности в шапке файла.
+_WARP_STATE_MAP: tuple[tuple[str, str], ...] = (
+    ("warp_installed",      "WARP_INSTALLED"),
+    ("warp_connected",      "WARP_CONNECTED"),
+    ("warp_mode",           "WARP_MODE"),
+    ("warp_ssh_ip",         "WARP_SSH_CLIENT_IP"),
+    ("warp_custom_ips",     "WARP_CUSTOM_IPS"),
+    ("warp_custom_domains", "WARP_CUSTOM_DOMAINS"),
+    ("warp_active_routes",  "WARP_ACTIVE_ROUTES"),
+)
+
+
+def _warp_state_load_autonomously() -> None:
+    """Читает core.STATE_FILE напрямую и раскладывает известные warp_*
+    ключи по глобалям ядра (setattr). Не требует НИЧЕГО, кроме уже
+    существующего в _core.py STATE_FILE."""
+    core = _core_module()
+    if not core.STATE_FILE.exists():
+        return
+    try:
+        state = json.loads(core.STATE_FILE.read_text())
+    except Exception:
+        return
+    for json_key, attr_name in _WARP_STATE_MAP:
+        if json_key in state:
+            setattr(core, attr_name, state[json_key])
+
+
+def _warp_state_save_autonomously() -> None:
+    """Атомарно сохраняет текущие WARP_*-глобали ядра в core.STATE_FILE.
+
+    Сама открывает файл в 'r+', блокирует через fcntl.flock(LOCK_EX),
+    перечитывает содержимое непосредственно перед записью (чтобы не
+    затереть UUID пользователей Xray или другие ключи ядра, изменённые
+    конкурентно), обновляет только свои warp_*-ключи и пишет обратно.
+    Никакой логики в _core.py для этого не требуется."""
+    core = _core_module()
+    if not core.STATE_FILE.exists():
+        return
+    import fcntl
+    try:
+        with core.STATE_FILE.open("r+") as f:
+            fcntl.flock(f, fcntl.LOCK_EX)
+            try:
+                f.seek(0)
+                content = f.read()
+                state = json.loads(content) if content else {}
+                for json_key, attr_name in _WARP_STATE_MAP:
+                    state[json_key] = getattr(core, attr_name, None)
+                f.seek(0)
+                f.truncate()
+                f.write(json.dumps(state, indent=2, ensure_ascii=False))
+            finally:
+                fcntl.flock(f, fcntl.LOCK_UN)
+    except Exception as e:
+        warn(f"Не удалось сохранить WARP state: {e}")
 
 
 # =============================================================================
@@ -297,7 +371,7 @@ def _clear_active_routes() -> None:
     for cidr in routes:
         _run(["ip", "route", "del", cidr, "dev", WG_INTERFACE], capture=True, quiet=True)
     _state_set("WARP_ACTIVE_ROUTES", [])
-    _core_module().warp_state_save()
+    _warp_state_save_autonomously()
 
 
 def _add_route(cidr: str) -> None:
@@ -420,7 +494,7 @@ def uninstall_warp() -> bool:
     _state_set("WARP_CONNECTED", False)
     _state_set("WARP_MODE", "")
     _state_set("WARP_ACTIVE_ROUTES", [])
-    _core_module().warp_state_save()
+    _warp_state_save_autonomously()
     success("WARP (WireGuard) полностью удалён из системы.")
     return True
 
@@ -453,7 +527,7 @@ def _warp_apply_full_mode(ssh_client_ip: str) -> None:
 
     _add_route("0.0.0.0/1")
     _add_route("128.0.0.0/1")
-    _core_module().warp_state_save()
+    _warp_state_save_autonomously()
     success("Режим FULL активирован — SSH и Cloudflare Endpoint защищены.")
 
 
@@ -467,7 +541,7 @@ def _warp_apply_selective_mode(ips: list[str], domains: list[str]) -> None:
     for cidr in _resolve_domains(domains):
         _add_route(cidr)
     _manage_cron(True)
-    _core_module().warp_state_save()
+    _warp_state_save_autonomously()
     success(f"Режим SELECTIVE активирован (IP: {len(ips)}, доменов: {len(domains)}).")
 
 
@@ -480,7 +554,7 @@ def _warp_apply_runet_mode() -> None:
     _clear_active_routes()
     for cidr in RUNET_CIDRS:
         _add_route(cidr)
-    _core_module().warp_state_save()
+    _warp_state_save_autonomously()
     success(f"Режим RUNET активирован. Добавлено {len(RUNET_CIDRS)} подсетей.")
 
 
@@ -552,7 +626,15 @@ def _standalone_sync() -> None:
                     if cidr not in old_routes:
                         _run(["ip", "route", "add", cidr, "dev", WG_INTERFACE], capture=True, quiet=True)
 
-                # Перечитываем файл перед записью — не затираем конкурентные изменения
+                # ВАЖНО: запись делается напрямую в fresh_state, а НЕ через
+                # _warp_state_save_autonomously(). Та функция берёт значения
+                # из in-memory глобалей core.WARP_*, которых в свежем
+                # процессе крона (`python warp.py --sync`) просто не
+                # существует (core.WARP_ACTIVE_ROUTES никогда не был
+                # установлен в этом процессе) — вызов автономной save-
+                # функции здесь затёр бы только что посчитанные маршруты
+                # пустым списком. Поэтому old_routes/desired читаются и
+                # пишутся напрямую из/в тот же JSON, под тем же flock.
                 f.seek(0)
                 fresh_content = f.read()
                 fresh_state = json.loads(fresh_content) if fresh_content else {}
@@ -595,7 +677,7 @@ def configure_warp(
 
     _state_set("WARP_CONNECTED", True)
     _apply_mode(mode, ssh_client_ip or "", custom_ips, custom_domains)
-    _core_module().warp_state_save()
+    _warp_state_save_autonomously()
     return True
 
 
@@ -779,7 +861,7 @@ def _menu_status_and_diagnostics() -> None:
 #  ГЛАВНАЯ ТОЧКА ВХОДА (НЕ МЕНЯТЬ ИМЯ/СИГНАТУРУ — вызывается из _core.py)
 # =============================================================================
 def do_manage_warp() -> None:
-    _core_module().warp_state_load()
+    _warp_state_load_autonomously()
 
     while True:
         os.system("clear")
@@ -839,7 +921,7 @@ def do_manage_warp() -> None:
                 _clear_active_routes()
                 _run(["systemctl", "stop", WG_SERVICE], check=False)
                 _state_set("WARP_CONNECTED", False)
-                _core_module().warp_state_save()
+                _warp_state_save_autonomously()
                 success("Туннель WARP остановлен, маршруты сброшены.")
             else:
                 _run(["systemctl", "start", WG_SERVICE], check=False)
