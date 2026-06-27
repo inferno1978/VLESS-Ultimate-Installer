@@ -412,6 +412,60 @@ def _warp_service_active() -> bool:
     return (r.stdout or "").strip() == "active"
 
 
+def _wireguard_ready() -> bool:
+    """И бинарник wg-quick, И сам systemd-шаблон wg-quick@.service должны
+    быть на месте. Встречаются образы VPS с частичной/битой установкой
+    пакета, где одно есть, а другого нет — именно так выглядела ошибка
+    'Unit wg-quick@wg-warp.service not found' при наличии самого wg-quick."""
+    if not command_exists("wg-quick"):
+        return False
+    r = _run(["systemctl", "list-unit-files", "wg-quick@.service"], capture=True, check=False)
+    return "wg-quick@.service" in (r.stdout or "")
+
+
+def _ensure_wireguard_installed() -> bool:
+    """Устанавливает wireguard-tools и ЯВНО проверяет результат.
+
+    core._pkg_install() вызывает apt-get с check=False, quiet=True
+    (stdout/stderr в DEVNULL) и никогда не сообщает об ошибке — если
+    install молча не сработал (типичная причина на свежих образах VPS —
+    протухший кэш пакетов, apt-get update никогда не вызывался), скрипт
+    раньше тихо шёл дальше: скачивал wgcf, регистрировал аккаунт
+    Cloudflare, генерировал конфиг — и только на systemctl start падал с
+    нечитаемым 'Unit wg-quick@wg-warp.service not found', без единой
+    зацепки за реальную причину. Здесь — свой explicit apt/dnf вызов с
+    захватом stderr и обязательный re-check после установки (бинарник И
+    systemd-юнит отдельно), до того как тратится регистрация WARP-аккаунта."""
+    if _wireguard_ready():
+        return True
+
+    info("Установка пакета wireguard-tools...")
+    pkg_mgr = getattr(_core_module(), "PKG_MGR", "apt")
+
+    if pkg_mgr == "apt":
+        # Свежие образы VPS нередко имеют устаревший кэш пакетов — без
+        # update install иногда молча не находит актуальный пакет.
+        _run(["apt-get", "update", "-q"], capture=True, check=False)
+        r = _run(["apt-get", "install", "-y", "-q", "wireguard", "wireguard-tools"],
+                  capture=True, check=False, env={"DEBIAN_FRONTEND": "noninteractive"})
+    else:
+        r = _run(["dnf", "install", "-y", "-q", "wireguard-tools"], capture=True, check=False)
+
+    if not command_exists("wg-quick"):
+        detail = (r.stderr or r.stdout or "").strip()[:300] or "(пустой вывод apt/dnf)"
+        warn(f"Не удалось установить wireguard-tools: {detail}")
+        warn("Установите пакет вручную (apt-get install wireguard-tools) и повторите.")
+        return False
+
+    if not _wireguard_ready():
+        warn("Бинарник wg-quick найден, но systemd-юнит wg-quick@.service отсутствует "
+             "— установка пакета частично повреждена.")
+        warn("Проверьте: dpkg -L wireguard-tools | grep systemd; "
+             "при необходимости — apt-get install --reinstall wireguard-tools.")
+        return False
+    return True
+
+
 def install_warp() -> bool:
     """Устанавливает WireGuard + wgcf, генерирует конфиг с Table = off и
     поднимает туннель РОВНО ОДИН РАЗ. Идемпотентна: при уже существующем
@@ -423,8 +477,8 @@ def install_warp() -> bool:
         return True
 
     info("Установка WireGuard и wgcf...")
-    if not command_exists("wg-quick"):
-        _pkg_install("wireguard", "wireguard-tools")
+    if not _ensure_wireguard_installed():
+        return False
     if not command_exists("curl"):
         _pkg_install("curl")
 
