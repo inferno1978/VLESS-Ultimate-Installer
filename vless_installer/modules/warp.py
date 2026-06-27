@@ -57,6 +57,25 @@ import time
 from pathlib import Path
 from typing import Optional
 
+# При запуске файла НАПРЯМУЮ (`python3 .../warp.py --sync` из cron,
+# `python3 .../warp.py --auto-rollback` из нашего systemd-run watchdog)
+# Python кладёт в sys.path[0] каталог самого файла
+# (.../vless_installer/modules), а НЕ корень проекта — относительный
+# импорт пакета vless_installer ниже падает с ModuleNotFoundError ДО
+# того, как успевает выполниться даже блок `if __name__ == "__main__":`
+# в конце файла (этот импорт — на верхнем уровне модуля, выполняется при
+# любом способе запуска, а не только при `import warp`). Подтверждено
+# трассировкой из journalctl у Ивана: ровно эта строка импорта и падала.
+# Вычисляем корень проекта от пути самого файла (а не хардкодим
+# конкретную инсталляцию типа /opt/vless-ultimate — как сделано в
+# fragment_watchdog.py, что ломается при другом пути установки): warp.py
+# лежит в <root>/vless_installer/modules/warp.py, поэтому
+# parent.parent.parent — это <root> при любой инсталляции.
+if __name__ == "__main__":
+    _project_root = Path(__file__).resolve().parent.parent.parent
+    if str(_project_root) not in sys.path:
+        sys.path.insert(0, str(_project_root))
+
 from vless_installer.modules.box_renderer import (
     _box_top, _box_row, _box_sep, _box_bottom,
     RED, GREEN, BLUE, CYAN, YELLOW, NC,
@@ -567,7 +586,23 @@ def uninstall_warp() -> bool:
 def _warp_apply_full_mode(ssh_client_ip: str) -> None:
     """FULL: весь трафик через WARP. SSH-клиент и сам Cloudflare-эндпоинт
     явно маршрутизируются через реальный (захваченный до WARP) шлюз —
-    иначе полный туннель неизбежно оборвёт текущую SSH-сессию."""
+    иначе полный туннель неизбежно оборвёт текущую SSH-сессию.
+
+    ВАЖНО про `onlink`: у многих провайдеров (видно по `ip route show
+    default` — `... via 10.0.0.1 dev ens3 onlink`) шлюз физически НЕ входит
+    в адресный диапазон, выданный интерфейсу (типичная /32-адресация). Раз
+    оригинальный default-маршрут потребовал `onlink`, чтобы ядро согласилось
+    его принять, ЛЮБОЙ другой маршрут через тот же шлюз/интерфейс — в том
+    числе наши защитные host-маршруты — требует ровно того же флага. Без
+    него `ip route add ... via <gw> dev <if>` падает с "Network is
+    unreachable" — а поскольку вызов идёт через _run(quiet=True,
+    check=False), ошибка проглатывается молча: маршрут не добавляется, но
+    выполнение продолжается как ни в чём не бывало, и split-default ниже
+    всё равно встаёт. `onlink` добавляем безусловно (не только когда
+    оригинальный маршрут был с этим флагом) — если шлюз и так лежит в
+    локальной подсети, флаг просто не делает ничего ("on-link" и так
+    верно), а если не лежит — без него маршрут не добавится вовсе.
+    Так что `onlink` тут строго безопасен в обоих случаях."""
     info("Применение режима FULL (весь трафик через WARP)...")
     _manage_cron(False)
     _clear_active_routes()
@@ -579,18 +614,34 @@ def _warp_apply_full_mode(ssh_client_ip: str) -> None:
 
     endpoint_ip = _get_warp_endpoint()
     if endpoint_ip and orig_gw:
-        _run(["ip", "route", "add", f"{endpoint_ip}/32", "via", orig_gw, "dev", orig_if],
-             capture=True, quiet=True)
+        r_ep = _run(["ip", "route", "add", f"{endpoint_ip}/32", "via", orig_gw,
+                      "dev", orig_if, "onlink"], capture=True, quiet=False, check=False)
+        if r_ep.returncode != 0 and "File exists" not in (r_ep.stderr or ""):
+            warn(f"Не удалось добавить защитный маршрут к Cloudflare Endpoint "
+                 f"({endpoint_ip}): {(r_ep.stderr or '').strip()[:200]}")
 
+    ssh_route_ok = False
     if ssh_client_ip and orig_gw:
         ssh_cidr = ssh_client_ip if "/" in ssh_client_ip else f"{ssh_client_ip}/32"
-        _run(["ip", "route", "add", ssh_cidr, "via", orig_gw, "dev", orig_if],
-             capture=True, quiet=True)
+        r_ssh = _run(["ip", "route", "add", ssh_cidr, "via", orig_gw,
+                       "dev", orig_if, "onlink"], capture=True, quiet=False, check=False)
+        if r_ssh.returncode == 0 or "File exists" in (r_ssh.stderr or ""):
+            ssh_route_ok = True
+        else:
+            warn(f"Не удалось добавить защитный маршрут к SSH-клиенту "
+                 f"({ssh_client_ip}): {(r_ssh.stderr or '').strip()[:200]}")
+    elif not ssh_client_ip:
+        warn("SSH client IP не задан — защитный маршрут к SSH не создаётся.")
 
     _add_route("0.0.0.0/1")
     _add_route("128.0.0.0/1")
     _warp_state_save_autonomously()
-    success("Режим FULL активирован — SSH и Cloudflare Endpoint защищены.")
+
+    if ssh_route_ok:
+        success("Режим FULL активирован — SSH и Cloudflare Endpoint защищены.")
+    else:
+        warn("Режим FULL активирован, НО защитный маршрут к SSH не подтверждён — "
+             "продолжайте полагаться на commit-confirm автооткат.")
 
 
 def _warp_apply_selective_mode(ips: list[str], domains: list[str]) -> None:
