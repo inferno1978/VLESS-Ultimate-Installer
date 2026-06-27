@@ -49,6 +49,7 @@ import json
 import os
 import platform
 import re
+import signal
 import socket
 import subprocess
 import sys
@@ -194,6 +195,13 @@ MODE_FULL           = "full"
 MODE_SELECTIVE      = "selective"
 MODE_RUNET          = "runet"
 VALID_MODES         = (MODE_FULL, MODE_SELECTIVE, MODE_RUNET)
+
+# Commit-confirm для режима FULL (см. блок ниже "COMMIT-CONFIRM"): единственный
+# режим, который трогает дефолтный маршрут и поэтому единственный, способный
+# оборвать текущую SSH-сессию. Таймаут — компромисс между "успеть набрать y"
+# по живому каналу и "не сидеть полпути к разрыву дольше необходимого".
+COMMIT_CONFIRM_TIMEOUT = 45  # секунд на подтверждение после применения FULL
+ROLLBACK_UNIT          = "warp-commit-confirm"  # имя transient systemd-юнита
 
 # Версия wgcf без буквы 'v' — именно так называется бинарник в релизе
 # (тег v2.2.31 → файл wgcf_2.2.31_linux_amd64, БЕЗ расширения .tar.gz и
@@ -614,11 +622,153 @@ def _warp_apply_runet_mode() -> None:
 
 def _apply_mode(mode: str, ssh_client_ip: str, custom_ips: list[str], custom_domains: list[str]) -> None:
     if mode == MODE_FULL:
-        _warp_apply_full_mode(ssh_client_ip)
+        _apply_full_mode_with_commit_confirm(ssh_client_ip)
     elif mode == MODE_SELECTIVE:
         _warp_apply_selective_mode(custom_ips, custom_domains)
     elif mode == MODE_RUNET:
         _warp_apply_runet_mode()
+
+
+# =============================================================================
+#  COMMIT-CONFIRM ДЛЯ FULL-РЕЖИМА (Juniper/Cisco-style auto-rollback)
+# =============================================================================
+# Единственный режим, ломающий маршрут к собственной SSH-сессии — FULL (он
+# единственный трогает дефолтный маршрут через split-default 0.0.0.0/1 +
+# 128.0.0.0/1). Защитные host-маршруты к SSH-клиенту/эндпоинту в
+# _warp_apply_full_mode() — best-effort: они зависят от того, удалось ли
+# захватить шлюз (_capture_original_route — не все провайдеры отдают
+# `default via X dev Y`, у некоторых это `default dev eth0 scope link` без
+# `via`) и от того, актуален ли IP клиента (автоопределение через
+# SSH_CLIENT/SSH_CONNECTION не работает под sudo/su, при ручном вводе можно
+# опечататься или IP мог смениться). Любая из этих причин — и сколько угодно
+# ещё не предусмотренных — не должна требовать ручного вмешательства через
+# консоль провайдера. Поэтому здесь НЕ чиним конкретную причину, а ставим
+# страховку уровня "что бы ни случилось — через N секунд откатится само":
+# независимый transient systemd-таймер планируется ДО применения маршрутов
+# (учли совет Ивана и сделали именно так, а не "после", иначе при разрыве
+# SSH прямо во время _warp_apply_full_mode таймер просто не успел бы встать)
+# и выполняет _rollback_full_mode() — БЕЗУСЛОВНУЮ остановку туннеля — если
+# подтверждение не пришло вовремя. Подтверждение в свою очередь работает в
+# той же самой SSH-сессии, что применяла режим: если она жива — человек
+# успевает набрать "y" и таймер отменяется; если сессия упала — input()
+# получает EOFError почти сразу (закрылся stdin), мы тихо выходим, а таймер
+# срабатывает сам и восстанавливает доступ без участия человека.
+def _schedule_rollback_watchdog(timeout_sec: int) -> bool:
+    """Планирует безусловный автооткат через systemd-run --on-active.
+    Намеренно простая команда без вычисления "почему откатываем" — сам
+    _rollback_full_mode() ничего не диагностирует, просто гарантированно
+    останавливает туннель и снимает все добавленные нами маршруты."""
+    _cancel_rollback_watchdog()  # на случай висящего таймера с прошлого раза
+    r = _run(
+        [
+            "systemd-run",
+            f"--unit={ROLLBACK_UNIT}",
+            f"--on-active={timeout_sec}s",
+            "--description=WARP commit-confirm: автооткат FULL-режима",
+            sys.executable, str(MODULE_PATH), "--auto-rollback",
+        ],
+        capture=True, check=False,
+    )
+    if r.returncode != 0:
+        warn(f"Не удалось запланировать сторожевой автооткат (systemd-run): "
+             f"{(r.stderr or '').strip()[:200] or 'неизвестная ошибка'}")
+        return False
+    return True
+
+
+def _cancel_rollback_watchdog() -> None:
+    """Отменяет ещё не сработавший таймер автооткат — вызывается и при
+    успешном подтверждении, и превентивно перед постановкой нового."""
+    _run(["systemctl", "stop", f"{ROLLBACK_UNIT}.timer"], capture=True, quiet=True, check=False)
+    _run(["systemctl", "reset-failed", f"{ROLLBACK_UNIT}.service"], capture=True, quiet=True, check=False)
+
+
+class _ConfirmTimeout(Exception):
+    """Внутренний сигнал истечения окна подтверждения (см. _confirm_with_timeout)."""
+
+
+def _confirm_with_timeout(prompt: str, timeout_sec: int) -> bool:
+    """input() с жёстким wall-clock таймаутом через signal.alarm — НЕ через
+    select/termios, чтобы не тянуть платформенные ограничения (Windows тут
+    не актуален, модуль исполняется только на Linux-сервере, но alarm()
+    проще и надёжнее прерывает блокирующий read под SIGALRM, чем опрос
+    дескриптора). Если SSH-сессия порвалась, stdin закрывается и input()
+    кидает EOFError даже раньше, чем долетит alarm — оба случая трактуются
+    одинаково: подтверждения не было."""
+    def _on_alarm(signum, frame):
+        raise _ConfirmTimeout()
+
+    old_handler = signal.signal(signal.SIGALRM, _on_alarm)
+    signal.alarm(timeout_sec)
+    try:
+        ans = input(prompt).strip().lower()
+        return ans in ("y", "yes", "да", "д")
+    except (_ConfirmTimeout, EOFError, KeyboardInterrupt, ValueError, OSError):
+        # EOFError — обычный "чистый" обрыв канала при чтении.
+        # ValueError/OSError — на случай, если stdin успел закрыться как
+        # файловый объект ДО вызова input() (а не просто отдать EOF при
+        # чтении) — оба исхода трактуем одинаково: подтверждения не было.
+        return False
+    finally:
+        signal.alarm(0)
+        signal.signal(signal.SIGALRM, old_handler)
+
+
+def _rollback_full_mode() -> None:
+    """Безусловный аварийный откат: останавливает туннель и снимает ВСЕ
+    маршруты, учтённые в WARP_ACTIVE_ROUTES (split-default 0.0.0.0/1 +
+    128.0.0.0/1, и всё, что было добавлено в SELECTIVE/RUNET до переключения
+    в FULL). Намеренно не пытается восстановить orig_gw/orig_if и не читает
+    ORIG_ROUTE_FILE — основной дефолтный маршрут мы никогда не трогали
+    (только накладывали на него более точные split-default маршруты), так
+    что простого снятия наших оверлеев достаточно для возврата к
+    маршрутизации в точности как до включения WARP. Это и есть причина,
+    по которой откат надёжен даже если ровно та же причина, что сломала
+    SSH, мешала бы восстановить orig_gw."""
+    core = _core_module()
+    core.log_to_file(
+        "WARN",
+        "WARP commit-confirm: подтверждение не получено за "
+        f"{COMMIT_CONFIRM_TIMEOUT} сек — выполняется автоматический откат FULL-режима.",
+    )
+    _manage_cron(False)
+    _clear_active_routes()
+    _run(["systemctl", "stop", WG_SERVICE], capture=True, quiet=True, check=False)
+    _state_set("WARP_CONNECTED", False)
+    _warp_state_save_autonomously()
+
+
+def _apply_full_mode_with_commit_confirm(ssh_client_ip: str) -> None:
+    """Обёртка над _warp_apply_full_mode() с commit-confirm защитой.
+
+    Порядок принципиален: таймер ставится ДО применения маршрутов — если
+    процесс оборвётся (вместе с SSH) прямо посреди _warp_apply_full_mode(),
+    откат всё равно сработает по расписанию независимо от живости текущего
+    процесса/сессии."""
+    watchdog_armed = _schedule_rollback_watchdog(COMMIT_CONFIRM_TIMEOUT)
+    if not watchdog_armed:
+        warn("Защитная сетка commit-confirm недоступна (нет systemd-run?) — "
+             "применяем FULL без страховки, как раньше.")
+
+    _warp_apply_full_mode(ssh_client_ip)
+
+    if not watchdog_armed:
+        return
+
+    info(f"Изменения применены. Если связь жива — подтвердите в течение "
+         f"{COMMIT_CONFIRM_TIMEOUT} сек. Если нет (или вы не успели) — "
+         f"автооткат восстановит доступ сам, без вашего участия.")
+    confirmed = _confirm_with_timeout(
+        f"{YELLOW}SSH работает? Подтвердите [y/N]:{NC} ",
+        COMMIT_CONFIRM_TIMEOUT,
+    )
+    if confirmed:
+        _cancel_rollback_watchdog()
+        success("Подтверждено — автооткат отменён, режим FULL закреплён.")
+    else:
+        warn(f"Подтверждение не получено — через несколько секунд (до "
+             f"{COMMIT_CONFIRM_TIMEOUT} сек. с момента применения) сработает "
+             f"автоматический откат и SSH будет восстановлен.")
 
 
 # =============================================================================
@@ -1018,3 +1168,10 @@ def do_manage_warp() -> None:
 if __name__ == "__main__":
     if "--sync" in sys.argv:
         _standalone_sync()
+    elif "--auto-rollback" in sys.argv:
+        # Точка входа для transient systemd-юнита, поставленного
+        # _schedule_rollback_watchdog(). Отдельный процесс, как и --sync —
+        # сначала обязательно подгружаем WARP_* состояние из state.json
+        # (в свежем процессе core.WARP_ACTIVE_ROUTES ещё не существует).
+        _warp_state_load_autonomously()
+        _rollback_full_mode()
