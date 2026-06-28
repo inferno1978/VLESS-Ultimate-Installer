@@ -238,6 +238,68 @@ RUNET_CIDRS = [
 
 
 # =============================================================================
+#  ENDPOINT WARP — МЕНЕДЖЕР УЗЛА ПОДКЛЮЧЕНИЯ (Anycast Cloudflare)
+# =============================================================================
+# Термин "Endpoint" / "узел подключения" умышленно НЕ называется "регионом":
+# Cloudflare WARP работает через Anycast — один и тот же физический узел
+# может обслуживать разные географии, и наоборот.
+WG_CONFIG_ENDPOINT_BACKUP = Path("/etc/wireguard/wg-warp.conf.endpoint-backup")
+
+# УТ-12: единый список портов — используется и при массовом сканировании,
+# и при точечном зонде конкретного (текущего/ручного/исторического) Endpoint.
+WARP_SCAN_PORTS: tuple[int, ...] = (2408, 500, 1701, 894, 4500)
+
+# Диапазоны для автоматического поиска (п.2 ТЗ).
+WARP_SCAN_RANGES: tuple[str, ...] = (
+    "162.159.192.0/24", "162.159.193.0/24", "162.159.195.0/24", "162.159.197.0/24",
+    "162.159.204.0/24", "162.159.239.0/24",
+    "188.114.96.0/24", "188.114.97.0/24", "188.114.98.0/24", "188.114.99.0/24",
+    "188.114.100.0/24", "188.114.101.0/24", "188.114.102.0/24", "188.114.103.0/24",
+    "188.114.104.0/24", "188.114.105.0/24", "188.114.106.0/24", "188.114.107.0/24",
+    "172.65.4.0/24", "172.65.32.0/24",
+    "104.16.10.0/24", "104.17.10.0/24",
+)
+WARP_HOSTS_PER_SUBNET = (2, 4)  # случайно 2–4 хоста на /24 (Anycast — весь /24 не нужен)
+
+
+def _build_fallback_endpoints() -> tuple[str, ...]:
+    """Fallback-список (п.1 ТЗ): фиксированные адрес:порт + .1/.10/.100 из
+    каждого дополнительного диапазона. Вычисляется один раз при импорте
+    модуля через ipaddress (stdlib) — не хардкодим расчётные адреса."""
+    import ipaddress
+    fixed = (
+        "engage.cloudflareclient.com:2408",
+        "162.159.192.1:2408", "162.159.193.1:500", "162.159.195.1:1701",
+        "162.159.204.1:894", "162.159.239.1:4500",
+    )
+    extra_ranges = (
+        "188.114.96.0/24", "188.114.97.0/24", "188.114.98.0/24", "188.114.99.0/24",
+        "188.114.100.0/24", "188.114.101.0/24", "188.114.102.0/24", "188.114.103.0/24",
+        "188.114.104.0/24", "188.114.105.0/24", "188.114.106.0/24", "188.114.107.0/24",
+        "172.65.4.0/24", "172.65.32.0/24",
+        "104.16.10.0/24", "104.17.10.0/24",
+    )
+    generated: list[str] = []
+    for cidr in extra_ranges:
+        net = ipaddress.ip_network(cidr, strict=False)
+        base = int(net.network_address)
+        for suffix, port in ((1, 2408), (10, 500), (100, 2408)):
+            generated.append(f"{ipaddress.ip_address(base + suffix)}:{port}")
+    return fixed + tuple(generated)
+
+
+WARP_FALLBACK_ENDPOINTS: tuple[str, ...] = _build_fallback_endpoints()
+
+ENDPOINT_TCP_TIMEOUT          = 1.5   # сек, уровень 1 (массовый TCP-connect, УТ-3)
+ENDPOINT_ICMP_TIMEOUT         = 1.0   # сек, уровень 2 (ICMP ping, если разрешён)
+ENDPOINT_SWITCH_THRESHOLD_MS  = 30    # УТ-4: переключать, если RTT нового ≤ RTT текущего − 30мс
+ENDPOINT_HISTORY_MAX          = 10    # УТ-6: не более 10 записей
+HANDSHAKE_WAIT_ACTIVE_SEC     = 5     # УТ-2, этап 1: дождаться active
+HANDSHAKE_SETTLE_SEC          = 3     # УТ-2, этап 3: пауза перед проверкой
+HANDSHAKE_CURL_TIMEOUT        = 5     # УТ-2, этап 2: таймаут генерации трафика
+
+
+# =============================================================================
 #  ЕДИНАЯ ОБЁРТКА ДЛЯ SHELL-КОМАНД
 # =============================================================================
 def _run(
@@ -385,6 +447,16 @@ def _get_warp_endpoint() -> Optional[str]:
     if not WG_CONFIG.exists():
         return None
     m = re.search(r"^Endpoint\s*=\s*([\d.]+):\d+", WG_CONFIG.read_text(), re.MULTILINE)
+    return m.group(1) if m else None
+
+
+def _get_warp_endpoint_full() -> Optional[str]:
+    """Извлекает 'ip:port' текущего Endpoint (комплементарно к
+    _get_warp_endpoint(), который отдаёт только IP для защитного маршрута
+    в _warp_apply_full_mode — та функция не меняется)."""
+    if not WG_CONFIG.exists():
+        return None
+    m = re.search(r"^Endpoint\s*=\s*([\d.]+:\d+)", WG_CONFIG.read_text(), re.MULTILINE)
     return m.group(1) if m else None
 
 
@@ -775,8 +847,26 @@ def _rollback_full_mode() -> None:
     что простого снятия наших оверлеев достаточно для возврата к
     маршрутизации в точности как до включения WARP. Это и есть причина,
     по которой откат надёжен даже если ровно та же причина, что сломала
-    SSH, мешала бы восстановить orig_gw."""
+    SSH, мешала бы восстановить orig_gw.
+
+    РАСШИРЕНИЕ (Endpoint-менеджер, аддитивно, не меняет логику ниже):
+    _change_warp_endpoint() переиспользует ровно этот же watchdog-юнит
+    (УТ-9) для смены Endpoint в FULL-режиме. Если на момент срабатывания
+    watchdog существует /etc/wireguard/wg-warp.conf.endpoint-backup —
+    значит откат вызван неподтверждённой сменой Endpoint, а не обычным
+    включением FULL. В этом случае ПЕРЕД остановкой туннеля возвращаем
+    старый конфиг — иначе при следующем запуске туннель поднялся бы уже с
+    новым, непроверенным Endpoint."""
     core = _core_module()
+    if WG_CONFIG_ENDPOINT_BACKUP.exists():
+        core.log_to_file("WARN", "WARP commit-confirm: откат смены Endpoint — восстанавливается предыдущий конфиг.")
+        try:
+            WG_CONFIG.write_text(WG_CONFIG_ENDPOINT_BACKUP.read_text())
+            WG_CONFIG.chmod(0o600)
+        except Exception as e:
+            core.log_to_file("ERROR", f"WARP commit-confirm: не удалось восстановить endpoint-backup: {e}")
+        WG_CONFIG_ENDPOINT_BACKUP.unlink(missing_ok=True)
+
     core.log_to_file(
         "WARN",
         "WARP commit-confirm: подтверждение не получено за "
@@ -901,6 +991,458 @@ def _standalone_sync() -> None:
                 fcntl.flock(f, fcntl.LOCK_UN)
     except Exception as e:
         core.log_to_file("ERROR", f"WARP --sync: {e}")
+
+
+# =============================================================================
+#  ENDPOINT WARP — ХРАНЕНИЕ КЭША/ИСТОРИИ (мимо _WARP_STATE_MAP, п.5/УТ-6)
+# =============================================================================
+# _WARP_STATE_MAP — явный белый список core-глобалей (см. шапку файла), и
+# расширять его не нужно: warp_endpoint_cache/warp_endpoint_history — это
+# собственные данные эндпоинт-менеджера, а не состояние ядра core.WARP_*.
+# Поэтому, как и _standalone_sync(), эти функции читают/пишут core.STATE_FILE
+# напрямую под fcntl.flock, перечитывая файл непосредственно перед записью —
+# чтобы не затереть конкурентные изменения (cron --sync, параллельная
+# SSH-сессия с открытым меню).
+_ENDPOINT_CACHE_KEY   = "warp_endpoint_cache"
+_ENDPOINT_HISTORY_KEY = "warp_endpoint_history"
+
+
+def _endpoint_cache_load() -> dict:
+    core = _core_module()
+    default = {"endpoints": [], "scanned_at": None, "valid": False}
+    if not core.STATE_FILE.exists():
+        return default
+    try:
+        state = json.loads(core.STATE_FILE.read_text())
+    except Exception:
+        return default
+    cache = state.get(_ENDPOINT_CACHE_KEY)
+    if not isinstance(cache, dict):
+        return default
+    cache.setdefault("endpoints", [])
+    cache.setdefault("scanned_at", None)
+    cache.setdefault("valid", False)
+    return cache
+
+
+def _endpoint_cache_save(endpoints: list[dict], valid: bool) -> None:
+    """УТ-14: при пустой выборке сканирования (endpoints=[]) сохраняется
+    valid=False — попытка использовать такой кэш в меню даёт предупреждение
+    и предложение пересканировать/взять fallback."""
+    core = _core_module()
+    if not core.STATE_FILE.exists():
+        warn("state.json не найден — кэш Endpoint не сохранён.")
+        return
+    import fcntl
+    try:
+        with core.STATE_FILE.open("r+") as f:
+            fcntl.flock(f, fcntl.LOCK_EX)
+            try:
+                f.seek(0)
+                content = f.read()
+                state = json.loads(content) if content else {}
+                state[_ENDPOINT_CACHE_KEY] = {
+                    "endpoints": endpoints,
+                    "scanned_at": time.time(),
+                    "valid": valid,
+                }
+                f.seek(0)
+                f.truncate()
+                f.write(json.dumps(state, indent=2, ensure_ascii=False))
+            finally:
+                fcntl.flock(f, fcntl.LOCK_UN)
+    except Exception as e:
+        warn(f"Не удалось сохранить кэш Endpoint: {e}")
+
+
+def _endpoint_history_load() -> list[dict]:
+    core = _core_module()
+    if not core.STATE_FILE.exists():
+        return []
+    try:
+        state = json.loads(core.STATE_FILE.read_text())
+    except Exception:
+        return []
+    history = state.get(_ENDPOINT_HISTORY_KEY, [])
+    return history if isinstance(history, list) else []
+
+
+def _endpoint_history_add(endpoint: str) -> None:
+    """УТ-6: не более 10 записей; повторное использование — обновляет
+    used_at и поднимает запись в начало, без дублей."""
+    core = _core_module()
+    if not core.STATE_FILE.exists():
+        return
+    import fcntl
+    try:
+        with core.STATE_FILE.open("r+") as f:
+            fcntl.flock(f, fcntl.LOCK_EX)
+            try:
+                f.seek(0)
+                content = f.read()
+                state = json.loads(content) if content else {}
+                history = state.get(_ENDPOINT_HISTORY_KEY, [])
+                if not isinstance(history, list):
+                    history = []
+                history = [h for h in history if h.get("endpoint") != endpoint]
+                history.insert(0, {"endpoint": endpoint, "used_at": time.time()})
+                state[_ENDPOINT_HISTORY_KEY] = history[:ENDPOINT_HISTORY_MAX]
+                f.seek(0)
+                f.truncate()
+                f.write(json.dumps(state, indent=2, ensure_ascii=False))
+            finally:
+                fcntl.flock(f, fcntl.LOCK_UN)
+    except Exception as e:
+        warn(f"Не удалось обновить историю Endpoint: {e}")
+
+
+# =============================================================================
+#  ENDPOINT WARP — ЗОНДИРОВАНИЕ (уровни 1–2, п.3 ТЗ)
+# =============================================================================
+def _tcp_probe(host: str, port: int, timeout: float = ENDPOINT_TCP_TIMEOUT) -> Optional[float]:
+    """Уровень 1: TCP-connect зонд, RTT в мс или None.
+    УТ-3: UDP-зонд для WireGuard не работает (сервер молча дропает любой
+    пакет, не являющийся валидным handshake-init) — поэтому используем
+    TCP-connect как массовый фильтр 'узел отвечает / не отвечает'.
+    Достоверное подтверждение реального WARP-трафика на конкретном Endpoint
+    даёт только сам handshake-чек в _verify_warp_handshake(), выполняемый
+    один раз — на этапе применения, а не на этапе массового сканирования."""
+    start = time.perf_counter()
+    try:
+        with socket.create_connection((host, port), timeout=timeout):
+            return (time.perf_counter() - start) * 1000.0
+    except OSError:
+        return None
+
+
+def _icmp_probe(host: str, timeout: float = ENDPOINT_ICMP_TIMEOUT) -> bool:
+    """Уровень 2: ICMP ping через системный бинарь — как и весь остальной
+    модуль (curl/wg/ip/systemctl), внешние проверки идут через _run().
+    Если ping недоступен или ICMP блокирован — просто False, без ошибки
+    (п.3 ТЗ: 'ICMP ping, если разрешён')."""
+    if not command_exists("ping"):
+        return False
+    r = _run(
+        ["ping", "-c", "1", "-W", str(max(1, int(round(timeout)))), host],
+        capture=True, check=False,
+    )
+    return r.returncode == 0
+
+
+def _select_scan_targets() -> list[str]:
+    """Из каждой /24 берёт 2–4 случайных хоста (Anycast — сканировать все
+    254 адреса избыточно: весь /24 отвечает с одной логической точки входа
+    Cloudflare). .hosts() уже исключает адрес сети и broadcast."""
+    import ipaddress
+    import random
+    targets: list[str] = []
+    for cidr in WARP_SCAN_RANGES:
+        net = ipaddress.ip_network(cidr, strict=False)
+        hosts = list(net.hosts())
+        if not hosts:
+            continue
+        k = min(len(hosts), random.randint(*WARP_HOSTS_PER_SUBNET))
+        targets.extend(str(h) for h in random.sample(hosts, k))
+    return targets
+
+
+def _probe_host_all_ports(host: str) -> Optional[dict]:
+    """УТ-12: проверяет ОДИН хост по ВСЕМ портам из WARP_SCAN_PORTS,
+    возвращает лучший (минимальный RTT) сработавший порт + результат ICMP.
+    None, если ни один порт не ответил."""
+    best_port: Optional[int] = None
+    best_rtt: Optional[float] = None
+    for port in WARP_SCAN_PORTS:
+        rtt = _tcp_probe(host, port)
+        if rtt is not None and (best_rtt is None or rtt < best_rtt):
+            best_port, best_rtt = port, rtt
+    if best_port is None:
+        return None
+    return {
+        "host": host,
+        "port": best_port,
+        "rtt_ms": round(best_rtt, 1),
+        "tcp_ok": True,
+        "icmp_ok": _icmp_probe(host),
+    }
+
+
+def _score_probe(result: dict) -> float:
+    """score = (tcp_ok?50:0) + (icmp_ok?30:0) + max(0, 20 − rtt_ms/10) — формула из п.3 ТЗ."""
+    tcp_part = 50.0 if result.get("tcp_ok") else 0.0
+    icmp_part = 30.0 if result.get("icmp_ok") else 0.0
+    rtt_ms = result.get("rtt_ms")
+    rtt_part = max(0.0, 20.0 - (rtt_ms / 10.0)) if rtt_ms is not None else 0.0
+    return tcp_part + icmp_part + rtt_part
+
+
+def _scan_warp_endpoints() -> list[dict]:
+    """Параллельное сканирование WARP_SCAN_RANGES (п.2 ТЗ). Только Python +
+    stdlib (socket, concurrent.futures, ipaddress, random) + системные
+    ping/curl, уже используемые в остальном модуле.
+    УТ-7: ThreadPoolExecutor(max_workers=min(100,len(targets))); на
+    KeyboardInterrupt — немедленный cancel_futures=True, без ожидания
+    зависших проверок."""
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+
+    targets = _select_scan_targets()
+    if not targets:
+        warn("Не удалось сформировать список адресов для сканирования.")
+        return []
+
+    info(f"Сканирование {len(targets)} адресов Cloudflare WARP "
+         f"(до {len(WARP_SCAN_PORTS)} портов на хост, таймаут {ENDPOINT_TCP_TIMEOUT}с)... "
+         f"Ctrl+C — прервать.")
+
+    results: list[dict] = []
+    max_workers = min(100, max(1, len(targets)))
+    executor = ThreadPoolExecutor(max_workers=max_workers)
+    futures = {executor.submit(_probe_host_all_ports, h): h for h in targets}
+    try:
+        for future in as_completed(futures):
+            res = future.result()
+            if res:
+                results.append(res)
+    except KeyboardInterrupt:
+        warn("Сканирование прервано пользователем — отменяю незавершённые проверки...")
+        executor.shutdown(wait=False, cancel_futures=True)
+        return []
+    executor.shutdown(wait=True)
+
+    for r in results:
+        r["score"] = round(_score_probe(r), 1)
+        r["endpoint"] = f"{r['host']}:{r['port']}"
+    results.sort(key=lambda x: x["score"], reverse=True)
+    top5 = results[:5]
+
+    if top5:
+        success(f"Найдено {len(results)} отвечающих узлов, в топ-5 — score "
+                f"{top5[0]['score']}–{top5[-1]['score']}.")
+    else:
+        warn("Сканирование не нашло ни одного отвечающего узла.")
+    return top5
+
+
+def _probe_single_endpoint(endpoint: str) -> dict:
+    """Быстрый зонд одного известного 'ip:port' (текущий / из истории /
+    введённый вручную / fallback) — TCP на указанный порт + ICMP (п.7 ТЗ:
+    'перед применением — проверить доступность')."""
+    try:
+        host, port_s = endpoint.rsplit(":", 1)
+        port = int(port_s)
+    except ValueError:
+        return {"endpoint": endpoint, "tcp_ok": False, "icmp_ok": False, "rtt_ms": None}
+    rtt = _tcp_probe(host, port)
+    icmp_ok = _icmp_probe(host) if rtt is not None else False
+    return {
+        "endpoint": endpoint,
+        "tcp_ok": rtt is not None,
+        "icmp_ok": icmp_ok,
+        "rtt_ms": round(rtt, 1) if rtt is not None else None,
+    }
+
+
+def _pick_best_endpoint(candidates: list[dict]) -> tuple[Optional[str], str]:
+    """Интеллектуальный подбор (п.4 ТЗ, УТ-4): переключать ТОЛЬКО если
+    текущий недоступен ИЛИ RTT нового ≤ RTT текущего − 30мс И новый
+    доступен по TCP+ICMP одновременно. Иначе — None и причина (для
+    информирования, без переключения)."""
+    if not candidates:
+        return None, "Список кандидатов пуст — пересканируйте или используйте fallback."
+
+    current = _get_warp_endpoint_full()
+    current_probe = (
+        _probe_single_endpoint(current) if current
+        else {"endpoint": None, "tcp_ok": False, "icmp_ok": False, "rtt_ms": None}
+    )
+
+    best = candidates[0]
+    if not current_probe["tcp_ok"]:
+        return best["endpoint"], f"Текущий Endpoint ({current or 'не задан'}) недоступен."
+
+    if not (best.get("tcp_ok") and best.get("icmp_ok")):
+        return None, (f"Лучший найденный кандидат {best['endpoint']} не проходит TCP+ICMP "
+                       f"одновременно — текущий ({current}) сохраняется.")
+
+    cur_rtt, new_rtt = current_probe["rtt_ms"], best.get("rtt_ms")
+    if cur_rtt is None or new_rtt is None:
+        return None, "Не удалось измерить RTT для сравнения — текущий Endpoint сохраняется."
+
+    if new_rtt <= cur_rtt - ENDPOINT_SWITCH_THRESHOLD_MS:
+        return best["endpoint"], (f"Новый узел {best['endpoint']} быстрее текущего на "
+                                   f"{cur_rtt - new_rtt:.0f} мс — рекомендуется переключение.")
+    return None, (f"Текущий Endpoint ({current}, {cur_rtt:.0f} мс) не хуже найденных "
+                  f"(порог {ENDPOINT_SWITCH_THRESHOLD_MS} мс) — переключение не требуется.")
+
+
+# =============================================================================
+#  ENDPOINT WARP — ПРОВЕРКА HANDSHAKE (уровень 3, п.3/УТ-2)
+# =============================================================================
+def _verify_warp_handshake() -> tuple[bool, bool]:
+    """Трёхэтапная проверка (УТ-2): (1) дождаться active, (2) сгенерировать
+    трафик curl'ом через интерфейс wg-warp на cdn-cgi/trace, (3) подождать
+    HANDSHAKE_SETTLE_SEC и проверить latest-handshakes>0 И warp=on.
+    Возвращает (handshake_ok, warp_on) — rollback в вызывающем коде
+    выполняется только если ОБА условия не выполнены."""
+    deadline = time.time() + HANDSHAKE_WAIT_ACTIVE_SEC
+    active = False
+    while time.time() < deadline:
+        if _warp_service_active():
+            active = True
+            break
+        time.sleep(0.5)
+    if not active:
+        return False, False
+
+    r_trace = _run(
+        ["curl", "-s", "--interface", WG_INTERFACE, "--max-time", str(HANDSHAKE_CURL_TIMEOUT),
+         "https://www.cloudflare.com/cdn-cgi/trace"],
+        capture=True, check=False,
+    )
+    time.sleep(HANDSHAKE_SETTLE_SEC)
+
+    r_hs = _run(["wg", "show", WG_INTERFACE, "latest-handshakes"], capture=True, check=False)
+    handshake_ok = False
+    for line in (r_hs.stdout or "").splitlines():
+        parts = line.split()
+        if len(parts) >= 2 and parts[-1].lstrip("-").isdigit() and int(parts[-1]) > 0:
+            handshake_ok = True
+            break
+
+    warp_on = "warp=on" in (r_trace.stdout or "")
+    return handshake_ok, warp_on
+
+
+def _restore_endpoint_backup() -> bool:
+    """Восстанавливает /etc/wireguard/wg-warp.conf из endpoint-backup и
+    перезапускает wg-quick@wg-warp. Используется и синхронным rollback'ом
+    внутри _change_warp_endpoint() (Selective/Runet и преждевременный фейл
+    в Full — до переприменения маршрутов), и (отдельно, см. выше)
+    расширённым _rollback_full_mode() при срабатывании watchdog."""
+    if not WG_CONFIG_ENDPOINT_BACKUP.exists():
+        return _warp_service_active()
+    WG_CONFIG.write_text(WG_CONFIG_ENDPOINT_BACKUP.read_text())
+    WG_CONFIG.chmod(0o600)
+    WG_CONFIG_ENDPOINT_BACKUP.unlink(missing_ok=True)
+    _run(["systemctl", "restart", WG_SERVICE], capture=True, quiet=True, check=False)
+    time.sleep(2)
+    return _warp_service_active()
+
+
+# =============================================================================
+#  ENDPOINT WARP — СМЕНА ENDPOINT (п.8 ТЗ)
+# =============================================================================
+def _change_warp_endpoint(new_endpoint: str) -> bool:
+    """Меняет активный Endpoint WARP ('ip:port'). Рестарт wg-quick@wg-warp —
+    единственное разрешённое исключение из правила "переключение без
+    рестарта" (УТ-1).
+
+    ЗАЩИТА SSH (приоритет №1): SSH-клиент защищён отдельным host-маршрутом
+    через orig_gw/orig_if (см. _warp_apply_full_mode) — этот маршрут НЕ
+    привязан к интерфейсу wg-warp и переживает его рестарт без изменений.
+    Default-маршрутизация (split-default 0.0.0.0/1+128.0.0.0/1, единственное,
+    что реально способно оборвать SSH) переприменяется ТОЛЬКО ПОСЛЕ того,
+    как новый Endpoint уже подтверждён живым handshake'ом — до этого момента
+    при любой ошибке откатываемся синхронно сами, риска для SSH не возникает
+    вовсе. Сам момент переприменения (и при успехе, и при восстановлении
+    после ошибки) — защищён ровно тем же commit-confirm watchdog'ом, что и
+    обычное включение FULL-режима (УТ-9: используется тот же
+    `warp-commit-confirm` юнит) — никакого отдельного, менее надёжного
+    механизма для Endpoint-менеджера не вводится."""
+    if not WG_CONFIG.exists():
+        warn("WARP не установлен — менять Endpoint нечего.")
+        return False
+
+    current = _get_warp_endpoint_full()
+    if current == new_endpoint:
+        info(f"Endpoint {new_endpoint} уже используется — изменений не требуется.")
+        return True
+
+    info(f"Проверка доступности {new_endpoint} перед применением...")
+    if not _probe_single_endpoint(new_endpoint)["tcp_ok"]:
+        warn(f"Endpoint {new_endpoint} не отвечает (TCP) — отклонён, текущий Endpoint сохранён.")
+        return False
+
+    mode = _state_get("WARP_MODE", MODE_FULL) or MODE_FULL
+    ssh_ip = _state_get("WARP_SSH_CLIENT_IP", "")
+    custom_ips = _state_get("WARP_CUSTOM_IPS", [])
+    custom_domains = _state_get("WARP_CUSTOM_DOMAINS", [])
+
+    if mode == MODE_FULL:
+        warn("Активен режим FULL — смена Endpoint меняет точку выхода ВСЕГО трафика "
+             "и может вызвать кратковременное прерывание связи на несколько секунд.")
+        if input(f"{YELLOW}Продолжить смену Endpoint? [y/N]:{NC} ").strip().lower() != "y":
+            info("Смена Endpoint отменена.")
+            return False
+
+    old_conf = WG_CONFIG.read_text()
+    new_conf = re.sub(r"^Endpoint\s*=\s*\S+", f"Endpoint = {new_endpoint}", old_conf, flags=re.MULTILINE)
+    if new_conf == old_conf:
+        warn("Не удалось найти строку Endpoint в конфиге — смена отменена.")
+        return False
+
+    WG_CONFIG_ENDPOINT_BACKUP.write_text(old_conf)   # УТ-11
+    WG_CONFIG_ENDPOINT_BACKUP.chmod(0o600)
+
+    watchdog_armed = False
+    if mode == MODE_FULL:
+        watchdog_armed = _schedule_rollback_watchdog(COMMIT_CONFIRM_TIMEOUT)
+        if not watchdog_armed:
+            warn("Защитная сетка commit-confirm недоступна (нет systemd-run?) — "
+                 "продолжаем без неё, как и при первом включении FULL.")
+
+    WG_CONFIG.write_text(new_conf)
+    WG_CONFIG.chmod(0o600)
+    info(f"Endpoint изменён на {new_endpoint}. Перезапуск {WG_SERVICE}...")
+    r_restart = _run(["systemctl", "restart", WG_SERVICE], capture=True, check=False)
+
+    restart_ok = r_restart.returncode == 0
+    handshake_ok = warp_on = False
+    if restart_ok:
+        handshake_ok, warp_on = _verify_warp_handshake()
+
+    # УТ-2: rollback только если ОБА условия (handshake И warp=on) не выполнены.
+    healthy = restart_ok and (handshake_ok or warp_on)
+
+    if not healthy:
+        warn("Восстановление связи через новый Endpoint не подтверждено "
+             f"(restart={'ok' if restart_ok else 'fail'}, "
+             f"handshake={'ok' if handshake_ok else 'fail'}, warp={'on' if warp_on else 'off'}).")
+        if watchdog_armed:
+            # Маршруты FULL-режима к НОВОМУ endpoint'у ещё не переприменялись
+            # (см. ниже) — SSH всё это время был защищён прежним host-маршрутом
+            # через orig_gw, не через wg-warp. Откатываемся синхронно сами,
+            # не дожидаясь срабатывания таймера.
+            _cancel_rollback_watchdog()
+        warn("Откат конфигурации и восстановление предыдущего рабочего состояния...")
+        _restore_endpoint_backup()
+        _apply_mode(mode, ssh_ip, custom_ips, custom_domains)
+        warn("Откат выполнен — Endpoint и маршруты возвращены к предыдущему рабочему состоянию.")
+        return False
+
+    # п.12/УТ-13: маршруты восстанавливаются строго существующими механизмами.
+    if mode == MODE_FULL:
+        _warp_apply_full_mode(ssh_ip)
+    else:
+        _apply_mode(mode, ssh_ip, custom_ips, custom_domains)
+
+    if mode == MODE_FULL and watchdog_armed:
+        info(f"Маршруты переприменены. Если связь жива — подтвердите в течение "
+             f"{COMMIT_CONFIRM_TIMEOUT} сек. Если нет — автооткат восстановит и Endpoint, "
+             f"и маршруты сам, без вашего участия.")
+        if _confirm_with_timeout(f"{YELLOW}SSH работает? Подтвердите [y/N]:{NC} ", COMMIT_CONFIRM_TIMEOUT):
+            _cancel_rollback_watchdog()
+        else:
+            warn(f"Подтверждение не получено — в течение {COMMIT_CONFIRM_TIMEOUT} сек "
+                 f"сработает автоматический откат (Endpoint + маршруты), SSH будет восстановлен.")
+            return False
+
+    WG_CONFIG_ENDPOINT_BACKUP.unlink(missing_ok=True)  # УТ-11: удаляется после успешного подтверждения
+    _state_set("WARP_CONNECTED", True)
+    _warp_state_save_autonomously()
+    _endpoint_history_add(new_endpoint)
+    success(f"Endpoint WARP изменён на {new_endpoint}.")
+    return True
 
 
 # =============================================================================
@@ -1115,6 +1657,170 @@ def _menu_status_and_diagnostics() -> None:
 # =============================================================================
 #  ГЛАВНАЯ ТОЧКА ВХОДА (НЕ МЕНЯТЬ ИМЯ/СИГНАТУРУ — вызывается из _core.py)
 # =============================================================================
+def _show_endpoint_pick_list(candidates: list[dict], title: str) -> None:
+    """Общий список выбора для результатов скана / кэша / fallback —
+    показывает RTT/score, если они есть, и применяет выбранный Endpoint."""
+    if not candidates:
+        warn("Список пуст.")
+        input(f"{BLUE}Нажмите Enter...{NC}")
+        return
+
+    os.system("clear")
+    _box_top(title)
+    _box_row()
+    for i, c in enumerate(candidates, start=1):
+        extra = ""
+        if c.get("rtt_ms") is not None:
+            extra = f"  RTT={c['rtt_ms']}мс  score={c.get('score', '?')}" \
+                    f"{'  ICMP+' if c.get('icmp_ok') else ''}"
+        _box_row(f"  {GREEN}{i}{NC}  {c['endpoint']}{extra}")
+    _box_row()
+    _box_row(f"  {RED}0{NC}  ← Назад")
+    _box_bottom()
+
+    choice = input("  Выбор: ").strip()
+    if not choice or choice == "0":
+        return
+    if not choice.isdigit() or not (1 <= int(choice) <= len(candidates)):
+        warn("Неверный выбор.")
+        time.sleep(1)
+        return
+
+    chosen = candidates[int(choice) - 1]["endpoint"]
+    if input(f"{YELLOW}Применить Endpoint {chosen}? [y/N]:{NC} ").strip().lower() == "y":
+        _change_warp_endpoint(chosen)
+    input(f"{BLUE}Нажмите Enter...{NC}")
+
+
+def _show_history_pick_list(history: list[dict]) -> None:
+    os.system("clear")
+    _box_top("История использованных Endpoint")
+    _box_row()
+    for i, h in enumerate(history, start=1):
+        used = time.strftime("%Y-%m-%d %H:%M", time.localtime(h.get("used_at", 0)))
+        _box_row(f"  {GREEN}{i}{NC}  {h['endpoint']}  (использован: {used})")
+    _box_row()
+    _box_row(f"  {RED}0{NC}  ← Назад")
+    _box_bottom()
+
+    choice = input("  Выбор: ").strip()
+    if not choice or choice == "0":
+        return
+    if not choice.isdigit() or not (1 <= int(choice) <= len(history)):
+        warn("Неверный выбор.")
+        time.sleep(1)
+        return
+
+    chosen = history[int(choice) - 1]["endpoint"]
+    if input(f"{YELLOW}Применить Endpoint {chosen}? [y/N]:{NC} ").strip().lower() == "y":
+        _change_warp_endpoint(chosen)
+    input(f"{BLUE}Нажмите Enter...{NC}")
+
+
+def _menu_endpoint_manager() -> None:
+    """Подменю 'Изменить Endpoint WARP' (п.15 ТЗ): текущий Endpoint, кэш,
+    история, ручной ввод, fallback, интеллектуальный подбор."""
+    while True:
+        os.system("clear")
+        current = _get_warp_endpoint_full() or "не задан"
+        cache = _endpoint_cache_load()
+        scanned_at = cache.get("scanned_at")
+        scanned_str = (
+            time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(scanned_at))
+            if scanned_at else "никогда"
+        )
+        cache_status = f"{GREEN}актуален{NC}" if cache.get("valid") else f"{YELLOW}неактуален{NC}"
+
+        _box_top("УПРАВЛЕНИЕ ENDPOINT WARP")
+        _box_row()
+        _box_row("  'Endpoint' ≠ регион: Cloudflare использует Anycast — один")
+        _box_row("  физический узел может обслуживать разные географии.")
+        _box_row()
+        _box_row(f"  Текущий Endpoint:  {CYAN}{current}{NC}")
+        _box_row(f"  Кэш сканирования:  {len(cache.get('endpoints', []))} узлов, {cache_status} "
+                  f"(проверен: {scanned_str})")
+        _box_row()
+        _box_sep()
+        _box_row(f"  {GREEN}1{NC}  Подобрать лучший Endpoint (авто-сравнение с текущим)")
+        _box_row(f"  {GREEN}2{NC}  Сканировать заново и выбрать из топ-5")
+        _box_row(f"  {GREEN}3{NC}  Выбрать из кэша последнего сканирования")
+        _box_row(f"  {GREEN}4{NC}  Выбрать из истории")
+        _box_row(f"  {GREEN}5{NC}  Ввести Endpoint вручную (ip:port)")
+        _box_row(f"  {GREEN}6{NC}  Использовать fallback-список")
+        _box_row()
+        _box_row(f"  {RED}0{NC}  ← Назад")
+        _box_bottom()
+
+        try:
+            ch = input(f"{CYAN}Выбор:{NC} ").strip()
+        except KeyboardInterrupt:
+            print()
+            return
+
+        if ch in ("0", "q", "Q", ""):
+            return
+
+        elif ch == "1":
+            candidates = cache.get("endpoints", []) if cache.get("valid") else []
+            if not candidates:
+                info("Актуального кэша нет — выполняется сканирование...")
+                candidates = _scan_warp_endpoints()
+                _endpoint_cache_save(candidates, valid=bool(candidates))
+            best, reason = _pick_best_endpoint(candidates)
+            info(reason)
+            if best:
+                if input(f"{YELLOW}Переключиться на {best}? [y/N]:{NC} ").strip().lower() == "y":
+                    _change_warp_endpoint(best)
+            input(f"{BLUE}Нажмите Enter...{NC}")
+
+        elif ch == "2":
+            try:
+                candidates = _scan_warp_endpoints()
+            except KeyboardInterrupt:
+                candidates = []
+            _endpoint_cache_save(candidates, valid=bool(candidates))
+            _show_endpoint_pick_list(candidates, "Результаты сканирования (топ-5)")
+
+        elif ch == "3":
+            fresh_cache = _endpoint_cache_load()
+            if not fresh_cache.get("valid") or not fresh_cache.get("endpoints"):
+                warn("Кэш пуст или помечен неактуальным — выберите пересканирование (2) "
+                     "или fallback-список (6).")
+                input(f"{BLUE}Нажмите Enter...{NC}")
+            else:
+                _show_endpoint_pick_list(fresh_cache["endpoints"], "Узлы из кэша")
+
+        elif ch == "4":
+            history = _endpoint_history_load()
+            if not history:
+                warn("История пуста.")
+                input(f"{BLUE}Нажмите Enter...{NC}")
+            else:
+                _show_history_pick_list(history)
+
+        elif ch == "5":
+            raw = input("  Введите Endpoint в формате ip:port: ").strip()
+            if not raw or ":" not in raw:
+                warn("Неверный формат — ожидается ip:port.")
+            else:
+                probe = _probe_single_endpoint(raw)
+                if not probe["tcp_ok"]:
+                    warn(f"Endpoint {raw} не отвечает (TCP) — отклонён.")
+                else:
+                    _change_warp_endpoint(raw)
+            input(f"{BLUE}Нажмите Enter...{NC}")
+
+        elif ch == "6":
+            _show_endpoint_pick_list(
+                [{"endpoint": ep, "rtt_ms": None} for ep in WARP_FALLBACK_ENDPOINTS],
+                "Fallback-список (без предварительной проверки)",
+            )
+
+        else:
+            warn("Неверный выбор.")
+            time.sleep(1)
+
+
 def do_manage_warp() -> None:
     _warp_state_load_autonomously()
 
@@ -1154,6 +1860,7 @@ def do_manage_warp() -> None:
                 _box_row(f"  {GREEN}3{NC}  Обновить списки IP/доменов")
             _box_row(f"  {GREEN}4{NC}  Статус, диагностика и проверка SSH")
             _box_row(f"  {GREEN}5{NC}  Отключить и удалить WARP")
+            _box_row(f"  {GREEN}6{NC}  Изменить Endpoint WARP (узел подключения)")
         _box_row()
         _box_row(f"  {RED}0{NC}  ← Назад")
         _box_bottom()
@@ -1207,6 +1914,9 @@ def do_manage_warp() -> None:
             if ans == "y":
                 uninstall_warp()
             input(f"{BLUE}Нажмите Enter...{NC}")
+
+        elif ch == "6" and installed:
+            _menu_endpoint_manager()
 
         else:
             warn("Неверный выбор.")
