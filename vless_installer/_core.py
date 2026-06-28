@@ -5181,6 +5181,28 @@ def _rebuild_and_restart_xray(ok_msg: str = "Xray активен") -> None:
     except Exception as _tp_e:
         warn(f"Telemt tproxy восстановление: {_tp_e}")
 
+    # Восстанавливаем экспериментальный постквантовый VLESS-инбаунд (если
+    # был включён). Та же причина, что и у Telemt выше — generate_*
+    # стирает любые дополнительные инбаунды. Восстанавливает СОХРАНЁННЫМИ
+    # ключами, никогда не генерирует новые — иначе уже выданные клиентам
+    # ссылки сломаются. Полностью изолирован от остальной генерации
+    # REALITY-конфига — свой порт, тот же dest/ключи с другим shortId.
+    try:
+        from vless_installer.modules.pq_vless import restore_pq_vless_if_enabled
+        _pq_result = restore_pq_vless_if_enabled(
+            domain=PARAM_DOMAIN, reality_dest=PARAM_REALITY_DEST,
+            private_key=PARAM_PRIVATE_KEY, public_key=PARAM_PUBLIC_KEY,
+            spiderx=PARAM_SPIDERX, xtls_flow=XTLS_FLOW, primary_uuid=PARAM_UUID,
+        )
+        if _pq_result is not None:
+            _pq_ok, _pq_msg = _pq_result
+            (info if _pq_ok else warn)(f"PQ VLESS: {_pq_msg}")
+        # None = фича не была включена — молчим
+    except ImportError:
+        pass
+    except Exception as _pq_e:
+        warn(f"PQ VLESS восстановление: {_pq_e}")
+
     # Финальный рестарт
     _run(["systemctl", "restart", "xray"], check=False, quiet=True)
     time.sleep(3)
@@ -28591,6 +28613,7 @@ def _menu_network() -> None:
         _box_item("D", f"🌐 Кастомные DNS правила  {DIM}(hosts / routing override){NC}")
         _box_item("M", f"📏 MTU/MSS автотюнинг  {DIM}(оптимизация для exit-нод){NC}")
         _box_item("X", f"⚡ XTLS-flow режим  {DIM}(Vision / Splice / none — только REALITY){NC}")
+        _box_item("P", f"🧪 Постквантовый VLESS  {DIM}(экспериментально, отдельный порт){NC}")
         _box_sep()
         _box_item("H", f"🚀 Hysteria2 транспорт  {DIM}(Режим B, Exit-нода, Балансировщик, DPI){NC}")
         _box_row()
@@ -28677,6 +28700,25 @@ def _menu_network() -> None:
                 time.sleep(2)
             else:
                 do_manage_xtls_flow()
+        elif ch.lower() == "p":
+            _load_state_into_globals()
+            if PROTOCOL_MODE != "reality":
+                warn("Постквантовый VLESS доступен только для REALITY (Режим A/B с REALITY).")
+                time.sleep(2)
+            else:
+                try:
+                    from vless_installer.modules.pq_vless import do_manage_pq_vless
+                    _, _, _pq_flag = get_server_country_cached()
+                    do_manage_pq_vless(
+                        domain=PARAM_DOMAIN, reality_dest=PARAM_REALITY_DEST,
+                        private_key=PARAM_PRIVATE_KEY, public_key=PARAM_PUBLIC_KEY,
+                        spiderx=PARAM_SPIDERX, xtls_flow=XTLS_FLOW,
+                        server_ip=get_server_ip("4"), country_flag=_pq_flag,
+                        fingerprint=PARAM_FINGERPRINT, primary_uuid=PARAM_UUID,
+                    )
+                except ImportError as e:
+                    warn(f"Модуль pq_vless не найден: {e}")
+                    time.sleep(2)
         elif ch.lower() == "h":
             do_hysteria2_menu()
         elif ch.lower() == "q" or ch == "":
