@@ -29662,7 +29662,7 @@ def _menu_rotation() -> None:
 #  ВСПОМОГАТЕЛЬНАЯ: загрузка state.json в глобальные переменные
 # =============================================================================
 def _load_state_into_globals() -> None:
-    global PARAM_DOMAIN, PARAM_UUID, PARAM_PUBLIC_KEY, PARAM_SHORTID
+    global PARAM_DOMAIN, PARAM_UUID, PARAM_PUBLIC_KEY, PARAM_PRIVATE_KEY, PARAM_SHORTID
     global IS_IPV6_AVAILABLE, IPV6_PREFLIGHT, PARAM_USE_DNSCRYPT
     global INSTALL_MODE, PROTOCOL_MODE, XHTTP_MODE, XHTTP_PATH, XHTTP_PERF_PRESET
     global AWG_EXIT_ENABLED, AWG_INSTALLED, AWG_EXIT_HOST, AWG_EXIT_PORT, PARAM_REALITY_DEST
@@ -29690,6 +29690,7 @@ def _load_state_into_globals() -> None:
         PARAM_DOMAIN     = state.get("domain",      PARAM_DOMAIN)
         PARAM_UUID       = state.get("uuid",        PARAM_UUID)
         PARAM_PUBLIC_KEY = state.get("public_key",  PARAM_PUBLIC_KEY)
+        PARAM_PRIVATE_KEY = state.get("private_key", PARAM_PRIVATE_KEY)
         PARAM_SHORTID    = state.get("short_id",    PARAM_SHORTID)
         PARAM_FINGERPRINT = state.get("fingerprint", PARAM_FINGERPRINT) or "chrome"
         IPV6_PREFLIGHT   = state.get("ipv6",        IPV6_PREFLIGHT)
