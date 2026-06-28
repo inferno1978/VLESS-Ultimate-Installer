@@ -97,6 +97,17 @@ from vless_installer.modules.tg_nets import (
     tg_nets_status_line  as _tg_nets_status_line,
 )
 
+# Telegram через WARP — для серверов в РФ, где Telemt стучится в Telegram
+# напрямую (standalone) или Exit-узел каскада делает финальное соединение.
+# См. шапку модуля telemt_warp_route.py — где это реально включать.
+from vless_installer.modules.telemt_warp_route import (
+    apply_telemt_warp_routing as _apply_telemt_warp_routing,
+    refresh_telemt_warp_routing as _refresh_telemt_warp_routing,
+    telemt_warp_status_line as _telemt_warp_status_line,
+    is_enabled as _telemt_warp_is_enabled,
+    do_telemt_warp_menu as _do_telemt_warp_menu,
+)
+
 # Гибридный fallback: Middle Proxy → Direct Mode (telemt_fallback.py)
 # Импортируем lazy чтобы не замедлять старт при первом импорте mtproto.
 def _get_fallback_module():
@@ -1921,6 +1932,9 @@ def _menu_xray_integration() -> None:
                     _ok(f"iptables REDIRECT обновлён: {len(new_nets)} подсетей активны")
             else:
                 _info("tproxy не активен — только файл обновлён.")
+            if _telemt_warp_is_enabled():
+                print()
+                _refresh_telemt_warp_routing()
             _pause()
 
         elif ch in ("q", ""):
@@ -1976,6 +1990,9 @@ def mtproto_menu() -> None:
         if _if_mod_for_status is not None and CONFIG_FILE.exists():
             _box_kv("iOS-фикс:", _if_mod_for_status.ios_fix_status_line())
 
+        # Статус Telegram → WARP одной строкой
+        _box_kv("TG→WARP:", _telemt_warp_status_line())
+
         _box_row(); _box_sep()
         _box_item("1", "🚀  Установить / переустановить")
         _box_item("2", "👥  Управление пользователями")
@@ -1989,6 +2006,7 @@ def mtproto_menu() -> None:
         _box_item("S", "🛡️   SYN-limiter (стабилизация подключения)")
         _box_item("I", "🍎  iOS-фикс (MSS + отдельный порт)")
         _box_item("N", "🌐  Обновить подсети Telegram (RIPE NCC)")
+        _box_item("W", "🌀  Telegram через WARP (для RU-серверов)")
         _box_item("8", f"{RED}🗑️   Полное удаление{NC}")
         _box_sep()
         _box_item("Q", "← Назад в главное меню VLESS")
@@ -2252,7 +2270,19 @@ def mtproto_menu() -> None:
                     _ok(f"iptables REDIRECT обновлён: {len(new_nets)} подсетей")
             else:
                 _info("tproxy не активен — iptables не обновляем.")
+            if _telemt_warp_is_enabled():
+                print()
+                _refresh_telemt_warp_routing()
             _pause()
+
+        elif ch == "w":
+            # ── Telegram через WARP ────────────────────────────────────────
+            try:
+                _do_telemt_warp_menu()
+            except _Cancelled:
+                pass
+            except Exception as _we:
+                _err(f"Ошибка меню Telegram→WARP: {_we}"); _pause()
 
         elif ch in ("q", ""):
             break
