@@ -393,9 +393,20 @@ def _write_and_test(cfg_path: Path, cfg: dict) -> Optional[str]:
     if xray_bin:
         r = _run([xray_bin, "run", "-test", "-config", str(cfg_path)], capture=True, check=False)
         if r.returncode != 0:
+            full_output = (r.stderr or r.stdout or "").strip()
+            # Сохраняем ПОЛНЫЙ вывод и сам провалившийся конфиг ДО отката —
+            # иначе после восстановления backup'а обе вещи теряются навсегда,
+            # а в _log()/_warn() выше по цепочке текст всё равно обрежется.
+            _log(f"[ERROR] [pq_vless] xray -test провалился, полный вывод:\n{full_output}")
+            try:
+                failed_path = cfg_path.with_suffix(cfg_path.suffix + ".pq-failed")
+                failed_path.write_text(json.dumps(cfg, indent=2, ensure_ascii=False))
+                _log(f"[INFO] [pq_vless] Провалившийся конфиг сохранён в {failed_path}")
+            except Exception as e:
+                _log(f"[WARN] [pq_vless] Не удалось сохранить провалившийся конфиг: {e}")
             if backup is not None:
                 cfg_path.write_text(backup)
-            return f"xray -test провалился: {(r.stderr or r.stdout).strip()[:300]}"
+            return f"xray -test провалился: {full_output[:1000]}"
     return None
 
 
