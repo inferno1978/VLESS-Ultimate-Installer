@@ -153,6 +153,39 @@ _WARP_STATE_MAP: tuple[tuple[str, str], ...] = (
 )
 
 
+def _ensure_state_file() -> bool:
+    """Создаёт core.STATE_FILE (и родительский каталог), если он ещё не
+    существует — с пустым {}.
+
+    НАЙДЕННЫЙ БАГ (не внесён этой правкой, но обнаружен и исправлен ею):
+    _warp_state_save_autonomously() и обе новые функции
+    _endpoint_cache_save()/_endpoint_history_add() проверяли
+    `core.STATE_FILE.exists()` и просто молча выходили, если файла нет —
+    то есть на сервере, где state.json ещё не создан какой-то другой
+    частью установщика (например, при изолированном запуске/тестировании
+    одного модуля WARP без полного прохождения установки Xray), ЛЮБАЯ
+    персистентность WARP молча отключалась: ни режим, ни SSH IP, ни
+    кастомные списки, ни кэш/история Endpoint никогда не попадали на диск,
+    без единой ошибки — `warn()` даже не вызывался, потому что код просто
+    возвращался раньше любой проверки. Подтверждено логом
+    /var/log/vless-install.log: «state.json не найден — кэш Endpoint не
+    сохранён» повторялось при каждом сканировании.
+
+    Возвращает True, если файл существует или был успешно создан."""
+    core = _core_module()
+    if core.STATE_FILE.exists():
+        return True
+    try:
+        core.STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
+        core.STATE_FILE.write_text("{}")
+        core.STATE_FILE.chmod(0o600)
+        warn(f"{core.STATE_FILE} не существовал — создан пустой ({{}}).")
+        return True
+    except Exception as e:
+        warn(f"Не удалось создать {core.STATE_FILE}: {type(e).__name__}: {e}")
+        return False
+
+
 def _warp_state_load_autonomously() -> None:
     """Читает core.STATE_FILE напрямую и раскладывает известные warp_*
     ключи по глобалям ядра (setattr). Не требует НИЧЕГО, кроме уже
@@ -178,7 +211,7 @@ def _warp_state_save_autonomously() -> None:
     конкурентно), обновляет только свои warp_*-ключи и пишет обратно.
     Никакой логики в _core.py для этого не требуется."""
     core = _core_module()
-    if not core.STATE_FILE.exists():
+    if not _ensure_state_file():
         return
     import fcntl
     try:
@@ -1025,14 +1058,20 @@ def _endpoint_cache_load() -> dict:
     return cache
 
 
-def _endpoint_cache_save(endpoints: list[dict], valid: bool) -> None:
+def _endpoint_cache_save(endpoints: list[dict], valid: bool) -> bool:
     """УТ-14: при пустой выборке сканирования (endpoints=[]) сохраняется
     valid=False — попытка использовать такой кэш в меню даёт предупреждение
-    и предложение пересканировать/взять fallback."""
+    и предложение пересканировать/взять fallback.
+
+    Возвращает True/False — вызывающий код в меню (ветка сканирования)
+    обязан проверить результат и сделать паузу перед os.system("clear"),
+    иначе сообщение об ошибке физически не видно на экране (warn() в этом
+    модуле и так пишет в core.log_to_file() при каждом вызове — см. шапку
+    файла, строки 112–124 — поэтому в /var/log/vless-install.log сообщение
+    остаётся в любом случае, даже если экран его стёр)."""
     core = _core_module()
-    if not core.STATE_FILE.exists():
-        warn("state.json не найден — кэш Endpoint не сохранён.")
-        return
+    if not _ensure_state_file():
+        return False
     import fcntl
     try:
         with core.STATE_FILE.open("r+") as f:
@@ -1051,8 +1090,10 @@ def _endpoint_cache_save(endpoints: list[dict], valid: bool) -> None:
                 f.write(json.dumps(state, indent=2, ensure_ascii=False))
             finally:
                 fcntl.flock(f, fcntl.LOCK_UN)
+        return True
     except Exception as e:
-        warn(f"Не удалось сохранить кэш Endpoint: {e}")
+        warn(f"Не удалось сохранить кэш Endpoint: {type(e).__name__}: {e}")
+        return False
 
 
 def _endpoint_history_load() -> list[dict]:
@@ -1071,7 +1112,7 @@ def _endpoint_history_add(endpoint: str) -> None:
     """УТ-6: не более 10 записей; повторное использование — обновляет
     used_at и поднимает запись в начало, без дублей."""
     core = _core_module()
-    if not core.STATE_FILE.exists():
+    if not _ensure_state_file():
         return
     import fcntl
     try:
@@ -1093,7 +1134,7 @@ def _endpoint_history_add(endpoint: str) -> None:
             finally:
                 fcntl.flock(f, fcntl.LOCK_UN)
     except Exception as e:
-        warn(f"Не удалось обновить историю Endpoint: {e}")
+        warn(f"Не удалось обновить историю Endpoint: {type(e).__name__}: {e}")
 
 
 # =============================================================================
@@ -1778,7 +1819,8 @@ def _menu_endpoint_manager() -> None:
                 candidates = _scan_warp_endpoints()
             except KeyboardInterrupt:
                 candidates = []
-            _endpoint_cache_save(candidates, valid=bool(candidates))
+            if not _endpoint_cache_save(candidates, valid=bool(candidates)):
+                input(f"{BLUE}Нажмите Enter, чтобы продолжить...{NC}")
             _show_endpoint_pick_list(candidates, "Результаты сканирования (топ-5)")
 
         elif ch == "3":
