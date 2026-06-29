@@ -117,7 +117,7 @@ USERS_FILE        = CONFIG_DIR / "users.json"
 
 _PQ_STATE_KEYS = (
     "pq_vless_enabled", "pq_vless_port", "pq_vless_shortid",
-    "pq_vless_decryption", "pq_vless_encryption",
+    "pq_vless_decryption", "pq_vless_encryption", "pq_vless_xtls_flow",
     "pq_vless_mldsa65_enabled", "pq_vless_mldsa65_seed", "pq_vless_mldsa65_verify",
 )
 
@@ -489,6 +489,7 @@ def enable_pq_vless(
         "pq_vless_shortid":         shortid,
         "pq_vless_decryption":      decryption,
         "pq_vless_encryption":      encryption,
+        "pq_vless_xtls_flow":       xtls_flow,
         "pq_vless_mldsa65_enabled": with_mldsa65,
         "pq_vless_mldsa65_seed":    mldsa65_seed if with_mldsa65 else "",
         "pq_vless_mldsa65_verify":  mldsa65_verify if with_mldsa65 else "",
@@ -518,6 +519,67 @@ def disable_pq_vless() -> tuple[bool, str]:
 
     pq_state_save({"pq_vless_enabled": False})
     return True, ("PQ VLESS-инбаунд отключён" if changed else "PQ-инбаунд не был активен")
+
+
+def set_pq_flow(
+    *,
+    domain: str,
+    reality_dest: str,
+    private_key: str,
+    public_key: str,
+    spiderx: str,
+    xtls_flow: str,
+    primary_uuid: str = "",
+) -> tuple[bool, str]:
+    """Переключает ТОЛЬКО flow у клиентов PQ-инбаунда (xtls_flow="" — без
+    flow, xtls_flow="xtls-rprx-vision" — с Vision-flow). Ключи, decryption,
+    shortId, mldsa65 — не трогаются и не перегенерируются, поэтому уже
+    выданная ссылка не ломается (кроме самого &flow= в ней — см. вызов
+    _build_pq_link после успешного переключения)."""
+    cfg_path = _xray_config_path()
+    if not cfg_path:
+        return False, "config.json Xray не найден"
+
+    state = pq_state_load()
+    if not state.get("pq_vless_enabled"):
+        return False, "PQ-инбаунд не включён"
+
+    decryption = state.get("pq_vless_decryption")
+    shortid    = state.get("pq_vless_shortid")
+    port       = state.get("pq_vless_port")
+    if not (decryption and shortid and port):
+        return False, "Состояние PQ-инбаунда повреждено — отключите и включите заново"
+
+    try:
+        cfg = json.loads(cfg_path.read_text())
+    except Exception as e:
+        return False, f"Не удалось прочитать {cfg_path}: {e}"
+
+    changed = inject_pq_inbound(
+        cfg, port=port, decryption=decryption, shortid=shortid,
+        reality_dest=reality_dest, domain=domain,
+        private_key=private_key, public_key=public_key, spiderx=spiderx,
+        users=_read_users(primary_uuid), xtls_flow=xtls_flow,
+        mldsa65_seed=(state.get("pq_vless_mldsa65_seed", "") or "")
+                     if state.get("pq_vless_mldsa65_enabled") else "",
+    )
+
+    if not changed:
+        pq_state_save({"pq_vless_xtls_flow": xtls_flow})
+        return True, "Flow уже был в этом состоянии — изменений не требовалось"
+
+    err = _write_and_test(cfg_path, cfg)
+    if err:
+        return False, err
+    _run(["systemctl", "restart", "xray"], check=False, quiet=True)
+    time.sleep(2)
+    rs = _run(["systemctl", "is-active", "xray"], capture=True, check=False)
+    if (rs.stdout or "").strip() != "active":
+        return False, "Xray не запустился после переключения flow — проверьте: journalctl -u xray -n 30"
+
+    pq_state_save({"pq_vless_xtls_flow": xtls_flow})
+    label = "xtls-rprx-vision" if xtls_flow else "без flow"
+    return True, f"Flow переключён: {label}"
 
 
 def restore_pq_vless_if_enabled(
@@ -559,11 +621,19 @@ def restore_pq_vless_if_enabled(
     if not (decryption and shortid and port):
         return False, "Сохранённое состояние PQ-инбаунда повреждено — отключите и включите заново"
 
+    # Сохранённый выбор flow для ЭТОГО инбаунда имеет приоритет над общим
+    # XTLS_FLOW проекта, переданным аргументом (на момент первого включения
+    # ключа "pq_vless_xtls_flow" в state.json ещё не было — тогда используем
+    # переданное значение как раньше, для обратной совместимости).
+    effective_flow = state.get("pq_vless_xtls_flow")
+    if effective_flow is None:
+        effective_flow = xtls_flow
+
     changed = inject_pq_inbound(
         cfg, port=port, decryption=decryption, shortid=shortid,
         reality_dest=reality_dest, domain=domain,
         private_key=private_key, public_key=public_key, spiderx=spiderx,
-        users=_read_users(primary_uuid), xtls_flow=xtls_flow,
+        users=_read_users(primary_uuid), xtls_flow=effective_flow,
         mldsa65_seed=(state.get("pq_vless_mldsa65_seed", "") or "")
                      if state.get("pq_vless_mldsa65_enabled") else "",
     )
@@ -631,18 +701,29 @@ def do_manage_pq_vless(
         port    = state.get("pq_vless_port", PQ_DEFAULT_PORT)
         mldsa   = bool(state.get("pq_vless_mldsa65_enabled"))
 
+        # Сохранённый выбор flow для ЭТОГО инбаунда — приоритетнее общего
+        # XTLS_FLOW проекта (он используется только как дефолт при самом
+        # первом включении, пока в state.json своего значения ещё нет).
+        effective_flow = state.get("pq_vless_xtls_flow")
+        if effective_flow is None:
+            effective_flow = xtls_flow
+
         print()
         _box_top("🧪  Постквантовый VLESS  (ЭКСПЕРИМЕНТАЛЬНО)")
         _box_row()
         _box_row(f"  Статус:   {GREEN+'включён'+NC if enabled else DIM+'выключен'+NC}")
         if enabled:
             _box_row(f"  Порт:     {CYAN}{port}{NC}")
+            _box_row(f"  Flow (xtls-rprx-vision): "
+                      f"{GREEN+'да'+NC if effective_flow else DIM+'нет'+NC}")
             _box_row(f"  PQ-подпись REALITY (mldsa65): "
                       f"{GREEN+'да'+NC if mldsa else DIM+'нет'+NC}")
         _box_row()
         _box_sep()
         _box_row(f"  {YELLOW}⚠  Не все клиенты понимают VLESS Encryption / mldsa65 —{NC}")
         _box_row(f"  {YELLOW}   известны случаи отказа подключения у части клиентов.{NC}")
+        _box_row(f"  {YELLOW}   На связке REALITY + flow=xtls-rprx-vision + VLESS Encryption{NC}")
+        _box_row(f"  {YELLOW}   подтверждена несовместимость — без flow подключение работает.{NC}")
         _box_row(f"  {YELLOW}   Основная (текущая) ссылка продолжает работать как прежде.{NC}")
         _box_sep()
         if not enabled:
@@ -651,6 +732,8 @@ def do_manage_pq_vless(
             _box_item("1", "Показать ссылку для клиента")
             _box_item("2", "Отключить")
             _box_item("3", "Перегенерировать ключи (старая PQ-ссылка перестанет работать)")
+            _box_item("4", "Переключить flow (сейчас: "
+                            f"{'с xtls-rprx-vision' if effective_flow else 'без flow'})")
         _box_row()
         _box_back()
         _box_bottom()
@@ -665,12 +748,16 @@ def do_manage_pq_vless(
             break
 
         elif ch == "1" and not enabled:
+            ans_flow = input(f"{YELLOW}Использовать flow=xtls-rprx-vision? Подтверждена несовместимость "
+                              f"с VLESS Encryption на части версий Xray — без flow надёжнее. "
+                              f"[y/N]:{NC} ").strip().lower()
+            chosen_flow = xtls_flow if ans_flow == "y" else ""
             ans = input(f"{YELLOW}Включить также постквантовую подпись REALITY (mldsa65)? "
                         f"На некоторых сборках Xray известны баги с этим полем. [y/N]:{NC} ").strip().lower()
             ok, msg = enable_pq_vless(
                 domain=domain, reality_dest=reality_dest,
                 private_key=private_key, public_key=public_key, spiderx=spiderx,
-                xtls_flow=xtls_flow, with_mldsa65=(ans == "y"), primary_uuid=primary_uuid,
+                xtls_flow=chosen_flow, with_mldsa65=(ans == "y"), primary_uuid=primary_uuid,
             )
             (_success if ok else _warn)(msg)
             input(f"{BLUE}Нажмите Enter...{NC}")
@@ -678,7 +765,7 @@ def do_manage_pq_vless(
         elif ch == "1" and enabled:
             link = _build_pq_link(
                 state, server_ip=server_ip, domain=domain, public_key=public_key,
-                fingerprint=fingerprint, xtls_flow=xtls_flow,
+                fingerprint=fingerprint, xtls_flow=effective_flow,
                 country_flag=country_flag, primary_uuid=primary_uuid,
             )
             print()
@@ -707,7 +794,21 @@ def do_manage_pq_vless(
                 ok, msg = enable_pq_vless(
                     domain=domain, reality_dest=reality_dest,
                     private_key=private_key, public_key=public_key, spiderx=spiderx,
-                    xtls_flow=xtls_flow, with_mldsa65=mldsa, primary_uuid=primary_uuid,
+                    xtls_flow=effective_flow, with_mldsa65=mldsa, primary_uuid=primary_uuid,
+                )
+                (_success if ok else _warn)(msg)
+            input(f"{BLUE}Нажмите Enter...{NC}")
+
+        elif ch == "4" and enabled:
+            new_flow = "" if effective_flow else xtls_flow
+            label = "без flow" if not new_flow else "с xtls-rprx-vision"
+            ans = input(f"{YELLOW}Переключить на «{label}»? Ключи/decryption не меняются, "
+                        f"в ссылке изменится только &flow=. [y/N]:{NC} ").strip().lower()
+            if ans == "y":
+                ok, msg = set_pq_flow(
+                    domain=domain, reality_dest=reality_dest,
+                    private_key=private_key, public_key=public_key, spiderx=spiderx,
+                    xtls_flow=new_flow, primary_uuid=primary_uuid,
                 )
                 (_success if ok else _warn)(msg)
             input(f"{BLUE}Нажмите Enter...{NC}")
