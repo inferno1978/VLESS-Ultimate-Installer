@@ -476,11 +476,37 @@ def _ensure_original_route() -> Optional[tuple[str, str]]:
 
 
 def _get_warp_endpoint() -> Optional[str]:
-    """Извлекает IP эндпоинта Cloudflare из сгенерированного конфига."""
+    """Извлекает IP эндпоинта Cloudflare из сгенерированного конфига — для
+    построения защитного маршрута в ядре (см. _ensure_endpoint_route()).
+
+    ВАЖНО: `wgcf generate` по умолчанию пишет в Endpoint ДОМЕН
+    (engage.cloudflareclient.com:2408), а не IP — это поведение самого
+    wgcf, не баг установки. Старая версия этой функции матчила только
+    IP-литерал и тихо возвращала None на любой свежей установке, из-за
+    чего защитный маршрут к эндпоинту в _warp_apply_full_mode() не
+    добавлялся вообще: после split-default (0.0.0.0/1 + 128.0.0.0/1)
+    UDP-пакеты хендшейка WireGuard к самому эндпоинту Cloudflare
+    заворачивались в туннель wg-warp, который этот хендшейк должен был
+    сначала установить — маршрутная петля, handshake = 0.
+
+    DNS-резолв используется ИСКЛЮЧИТЕЛЬНО для построения маршрута в ядре:
+    результат никогда не записывается обратно в Endpoint конфига и не
+    кешируется в state.json — живёт только в памяти на время вызова."""
     if not WG_CONFIG.exists():
         return None
-    m = re.search(r"^Endpoint\s*=\s*([\d.]+):\d+", WG_CONFIG.read_text(), re.MULTILINE)
-    return m.group(1) if m else None
+    m = re.search(r"^Endpoint\s*=\s*(\S+)", WG_CONFIG.read_text(), re.MULTILINE)
+    if not m:
+        return None
+    host = m.group(1).rsplit(":", 1)[0].strip()
+    if not host:
+        return None
+    if re.match(r"^[\d.]+$", host):
+        return host
+    try:
+        return socket.gethostbyname(host)
+    except OSError as e:
+        warn(f"Не удалось разрешить домен эндпоинта WARP ({host}): {e}")
+        return None
 
 
 def _get_warp_endpoint_full() -> Optional[str]:
@@ -491,6 +517,74 @@ def _get_warp_endpoint_full() -> Optional[str]:
         return None
     m = re.search(r"^Endpoint\s*=\s*([\d.]+:\d+)", WG_CONFIG.read_text(), re.MULTILINE)
     return m.group(1) if m else None
+
+
+def _ensure_endpoint_route() -> None:
+    """Единая точка добавления/поддержания защитного маршрута к эндпоинту
+    Cloudflare через РЕАЛЬНЫЙ (не wg-warp) шлюз.
+
+    Инвариант: маршрут к эндпоинту WARP никогда не должен идти через сам
+    интерфейс wg-warp — иначе UDP-пакеты хендшейка WireGuard к этому же
+    эндпоинту заворачиваются в туннель, который они сами должны сначала
+    установить (маршрутная петля → handshake = 0, см. докстринг
+    _get_warp_endpoint()).
+
+    Идемпотентна: безопасно вызывать повторно — в т.ч. из
+    _change_warp_endpoint() после смены Endpoint и из
+    _warp_apply_full_mode() при каждом применении режима FULL. Не создаёт
+    дублирующихся маршрутов, не использует time.sleep(), не проверяет
+    handshake WireGuard (это вне её ответственности — только таблица
+    маршрутизации ядра)."""
+    endpoint_raw = _get_warp_endpoint_full()  # "ip:port" как в конфиге, для диагностики
+    endpoint_ip = _get_warp_endpoint()
+    if not endpoint_ip:
+        host_part = endpoint_raw.rsplit(":", 1)[0] if endpoint_raw else "?"
+        warn(f"Эндпоинт WARP ({host_part}) не определён — домен не "
+             f"резолвится или строка Endpoint не найдена в конфиге. "
+             f"Защитный маршрут не добавлен, риск маршрутной петли через "
+             f"{WG_INTERFACE} сохраняется.")
+        return
+
+    orig = _ensure_original_route()
+    if not orig or not orig[0] or not orig[1]:
+        warn(f"Не удалось определить реальный шлюз сервера — защитный "
+             f"маршрут к эндпоинту WARP ({endpoint_ip}) не добавлен.")
+        return
+    orig_gw, orig_if = orig
+
+    def _current_route_via_kernel() -> str:
+        r = _run(["ip", "route", "get", endpoint_ip], capture=True, quiet=True, check=False)
+        return r.stdout or ""
+
+    # Если маршрут к эндпоинту уже существует, но идёт через сам туннель —
+    # ip route add ниже просто откажет с "File exists", и петля останется.
+    # Сначала убираем неправильный маршрут.
+    if WG_INTERFACE in _current_route_via_kernel():
+        _run(["ip", "route", "del", f"{endpoint_ip}/32"], capture=True, quiet=True, check=False)
+
+    def _try_add() -> tuple[bool, str]:
+        r = _run(["ip", "route", "add", f"{endpoint_ip}/32", "via", orig_gw,
+                   "dev", orig_if, "onlink"], capture=True, quiet=True, check=False)
+        ok = r.returncode == 0 or "File exists" in (r.stderr or "")
+        return ok, (r.stderr or "").strip()
+
+    add_ok, add_err = _try_add()
+    check = _current_route_via_kernel()
+    route_ok = add_ok and orig_if in check and WG_INTERFACE not in check
+
+    if not route_ok:
+        # Один повтор без паузы (например, гонка с параллельным
+        # применением split-default 0.0.0.0/1 + 128.0.0.0/1).
+        add_ok, add_err = _try_add()
+        check = _current_route_via_kernel()
+        route_ok = add_ok and orig_if in check and WG_INTERFACE not in check
+
+    if not route_ok:
+        warn(f"Не удалось гарантировать защитный маршрут к эндпоинту WARP "
+             f"({endpoint_ip}, в конфиге задан как {endpoint_raw or '?'}) "
+             f"через {orig_if}/{orig_gw}. ip route add: "
+             f"{'ok' if add_ok else (add_err or 'ошибка')}; "
+             f"ip route get сейчас: {check.strip()[:200] or 'пусто'}.")
 
 
 # =============================================================================
@@ -717,13 +811,7 @@ def _warp_apply_full_mode(ssh_client_ip: str) -> None:
     if not orig_gw:
         warn("Не удалось определить реальный шлюз сервера — защита SSH/Endpoint может не сработать.")
 
-    endpoint_ip = _get_warp_endpoint()
-    if endpoint_ip and orig_gw:
-        r_ep = _run(["ip", "route", "add", f"{endpoint_ip}/32", "via", orig_gw,
-                      "dev", orig_if, "onlink"], capture=True, quiet=False, check=False)
-        if r_ep.returncode != 0 and "File exists" not in (r_ep.stderr or ""):
-            warn(f"Не удалось добавить защитный маршрут к Cloudflare Endpoint "
-                 f"({endpoint_ip}): {(r_ep.stderr or '').strip()[:200]}")
+    _ensure_endpoint_route()
 
     ssh_route_ok = False
     if ssh_client_ip and orig_gw:
