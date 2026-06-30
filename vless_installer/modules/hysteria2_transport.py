@@ -132,7 +132,7 @@ def _build_h2_outbound(
     exit_port: int,
     auth_password: str,
     tag: str = "proxy",
-    insecure: bool = True,
+    cert_sha256: str = "",
     sni: Optional[str] = None,
     enable_mux: bool = True,
 ) -> dict:
@@ -146,9 +146,26 @@ def _build_h2_outbound(
     актуальных сборок Xray-core) и падает с "unknown config id" / валидацией.
     Источник схемы: infra/conf/hysteria.go в XTLS/Xray-core (network: "hysteria",
     settings.version + streamSettings.hysteriaSettings.version).
+
+    TLS: поле "allowInsecure" с июня 2026 полностью убрано из Xray-core
+    ("The feature 'allowInsecure' has been removed and migrated to
+    'pinnedPeerCertSha256'"). Для самоподписанного сертификата exit-ноды
+    нужно явно пиннить его SHA256-отпечаток вместо отключения проверки —
+    отпечаток считается при установке H2 (см. h2_cert_sha256_local() /
+    удалённую установку по SSH) и хранится в state.json у каждой exit-ноды.
     """
     ipv6 = _is_ipv6(exit_ip)
     server_addr = _bracket(exit_ip) if ipv6 else exit_ip
+
+    tls_settings: dict = {
+        "serverName": sni or exit_ip,
+    }
+    if cert_sha256:
+        tls_settings["pinnedPeerCertSha256"] = [cert_sha256]
+    else:
+        warn("Нет сохранённого SHA256-отпечатка сертификата exit-ноды — "
+             "TLS-валидация, скорее всего, провалится. Переустановите H2 "
+             "на exit-ноде (меню 7 → 1/2), чтобы отпечаток сохранился.")
 
     outbound = {
         "tag": tag,
@@ -161,14 +178,7 @@ def _build_h2_outbound(
         "streamSettings": {
             "network": "hysteria",
             "security": "tls",
-            "tlsSettings": {
-                # Если на exit-ноде валидный сертификат (certbot) — лучше
-                # передавать реальный SNI; при самоподписанном сертификате
-                # (insecure=True) serverName не проверяется и можно оставить
-                # IP/домен exit-ноды как есть.
-                "serverName": sni or exit_ip,
-                "allowInsecure": insecure,
-            },
+            "tlsSettings": tls_settings,
             "hysteriaSettings": {
                 "version": 2,
                 "auth": auth_password,
@@ -261,13 +271,21 @@ def h2_transport_apply(
         error("Не задан пароль аутентификации H2")
         return False
 
+    # Находим сохранённый SHA256-отпечаток сертификата этой exit-ноды —
+    # нужен для pinnedPeerCertSha256 (allowInsecure в Xray-core больше нет).
+    cert_sha256 = ""
+    for n in h2.get("exit_nodes", []):
+        if n.get("ip") == exit_ip:
+            cert_sha256 = n.get("cert_sha256", "")
+            break
+
     cfg = _load_xray_config()
     if cfg is None:
         error("Xray config.json не найден")
         return False
 
     new_ob = _build_h2_outbound(exit_ip, exit_port, auth_password,
-                                 insecure=insecure)
+                                 cert_sha256=cert_sha256)
 
     idx = _find_proxy_outbound_idx(cfg)
     if idx >= 0:

@@ -44,7 +44,7 @@ from vless_installer.modules.hysteria2_common import (
     open_udp_ports, close_udp_ports,
     _systemctl, _service_active, _h2_binary_exists, _h2_binary_version,
     H2_CONFIG_DIR, H2_CONFIG_FILE, H2_BINARY, H2_SERVICE, H2_LOG_FILE,
-    H2_CERT_FILE, H2_KEY_FILE,
+    H2_CERT_FILE, H2_KEY_FILE, h2_cert_sha256_local,
 )
 from vless_installer.modules.box_renderer import (
     _box_top, _box_row, _box_item, _box_item_exit, _box_sep,
@@ -317,6 +317,7 @@ def h2_exit_install(
         "status": "active",
         "ipstack": "dual" if ipv6_avail else "ipv4",
         "version": _h2_binary_version(),
+        "cert_sha256": h2_cert_sha256_local(cert_path),
         "metrics": {"rtt_ms": 0, "loss_pct": 0.0, "speed_mbps": 0},
     }
     existing = [n for n in h2.get("exit_nodes", []) if n.get("ip") != local_ip]
@@ -527,6 +528,22 @@ def h2_exit_remote_install(
         warn("Установка завершилась с предупреждениями, но сервис активен — "
              "проверьте конфиг при необходимости.")
 
+    # Забираем SHA256-отпечаток сертификата удалённой ноды — нужен для
+    # streamSettings.tlsSettings.pinnedPeerCertSha256 на Entry-ноде (с июня
+    # 2026 это единственный способ доверять самоподписанному сертификату,
+    # allowInsecure из Xray-core убран).
+    _fp_cmd = ["ssh"] + ssh_opts + [
+        f"root@{host}",
+        "openssl x509 -noout -fingerprint -sha256 -in /etc/xray/hysteria.crt 2>/dev/null"
+    ]
+    if ssh_pass:
+        _fp_cmd = ["sshpass", "-p", ssh_pass] + _fp_cmd
+    _fp_r = _run(_fp_cmd, capture=True, timeout=15, check=False)
+    _cert_sha256 = _fp_r.stdout.split("=", 1)[-1].strip().replace(":", "").lower()
+    if not _cert_sha256:
+        warn("Не удалось получить SHA256-отпечаток сертификата удалённой ноды — "
+             "транспорт H2 не сможет валидировать TLS (pinnedPeerCertSha256 будет пуст)")
+
     # Добавляем ноду в state
     h2 = _ensure_h2_state()
     existing = [n for n in h2.get("exit_nodes", []) if n.get("ip") != host]
@@ -538,6 +555,7 @@ def h2_exit_remote_install(
         "status": "active",
         "ipstack": "dual" if remote_ipv6 else "v4",
         "version": tag.lstrip("v"),
+        "cert_sha256": _cert_sha256,
         "metrics": {"rtt_ms": 0, "loss_pct": 0.0, "speed_mbps": 0},
     })
     h2["exit_nodes"] = existing

@@ -195,6 +195,23 @@ def _tg_h2_event(event: str, detail: str = "") -> None:
     _log("INFO", f"TG H2 event: {event} — {detail}")
 
 # ── IPv6 helper ───────────────────────────────────────────────────────────────
+def h2_cert_sha256_local(cert_path: str) -> str:
+    """
+    Возвращает SHA256-отпечаток сертификата в hex (нижний регистр, без
+    двоеточий) — нужен для Xray-core streamSettings.tlsSettings.
+    pinnedPeerCertSha256 (с июня 2026 это единственный способ "доверять"
+    самоподписанному сертификату — поле allowInsecure из Xray-core убрано).
+    """
+    try:
+        r = _run(["openssl", "x509", "-noout", "-fingerprint", "-sha256",
+                   "-in", cert_path], capture=True)
+        # Вывод вида: "sha256 Fingerprint=AE:24:3D:...:BF:77"
+        raw = r.stdout.split("=", 1)[-1].strip()
+        return raw.replace(":", "").lower()
+    except Exception:
+        return ""
+
+
 def _is_ipv6(addr: str) -> bool:
     return ":" in addr
 
