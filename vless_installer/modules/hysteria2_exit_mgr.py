@@ -434,6 +434,18 @@ def h2_exit_remote_install(
     else:
         info(f"Архитектура удалённой ноды: {_remote_arch_raw} -> {arch}")
 
+    # Определяем, есть ли IPv6 на удалённой ноде — раньше ipv6=True было
+    # захардкожено, и на VPS без IPv6 (частый случай) Hysteria не мог
+    # забиндиться на [::]:port, сервис не стартовал.
+    _ipv6_cmd = ["ssh"] + ssh_opts_pre + [
+        f"root@{host}", "ip -6 addr show 2>/dev/null | grep -q inet6 && echo yes || echo no"
+    ]
+    if ssh_pass:
+        _ipv6_cmd = ["sshpass", "-p", ssh_pass] + _ipv6_cmd
+    _ipv6_r = _run(_ipv6_cmd, capture=True, timeout=15, check=False)
+    remote_ipv6 = _ipv6_r.returncode == 0 and "yes" in _ipv6_r.stdout
+    info(f"IPv6 на удалённой ноде: {'есть' if remote_ipv6 else 'нет'}")
+
     # Строим URL под архитектуру удалённой машины
     try:
         _gr = _run(["curl", "-s", "--max-time", "15", _GH_API], capture=True)
@@ -470,9 +482,10 @@ def h2_exit_remote_install(
     ] + [f"iptables -I INPUT -p udp --dport {p} -j ACCEPT" for p in ports]
 
     # Пишем конфиг через SSH heredoc
-    cfg = _generate_h2_config("::", ports, auth_password,
+    _remote_listen_host = "::" if remote_ipv6 else "0.0.0.0"
+    cfg = _generate_h2_config(_remote_listen_host, ports, auth_password,
                                "/etc/xray/hysteria.crt", "/etc/xray/hysteria.key",
-                               ipv6=True)
+                               ipv6=remote_ipv6)
     cfg_cmd = f"cat > /etc/hysteria/config.yaml << 'EOFH2'\n{cfg}\nEOFH2"
     commands.insert(2, cfg_cmd)
 
@@ -480,6 +493,7 @@ def h2_exit_remote_install(
     if ssh_key:
         ssh_opts += ["-i", ssh_key]
 
+    _had_errors = False
     for cmd in commands:
         ssh_cmd = ["ssh"] + ssh_opts + [f"root@{host}", cmd]
         if ssh_pass:
@@ -487,6 +501,29 @@ def h2_exit_remote_install(
         r = _run(ssh_cmd, capture=True, timeout=90)
         if r.returncode != 0:
             warn(f"SSH команда завершилась с ошибкой: {r.stderr[:200]}")
+            _had_errors = True
+
+    # Не верим на слово команде "systemctl enable --now" — реально
+    # проверяем статус сервиса на удалённой ноде, иначе можно отрапортовать
+    # "H2 установлен" даже когда сервис не запустился (см. ipv6-баг выше).
+    _status_cmd = ["ssh"] + ssh_opts + [
+        f"root@{host}", f"systemctl is-active {H2_SERVICE}"
+    ]
+    if ssh_pass:
+        _status_cmd = ["sshpass", "-p", ssh_pass] + _status_cmd
+    _status_r = _run(_status_cmd, capture=True, timeout=15, check=False)
+    _remote_active = _status_r.stdout.strip() == "active"
+
+    if not _remote_active:
+        error(
+            f"Hysteria2 на {host} НЕ запустился (systemctl is-active вернул "
+            f"{_status_r.stdout.strip()!r}). Проверьте на ноде: "
+            f"journalctl -u {H2_SERVICE} -n 50 и /var/log/hysteria.log"
+        )
+        return False
+    if _had_errors:
+        warn("Установка завершилась с предупреждениями, но сервис активен — "
+             "проверьте конфиг при необходимости.")
 
     # Добавляем ноду в state
     h2 = _ensure_h2_state()
@@ -497,7 +534,7 @@ def h2_exit_remote_install(
         "auth": auth_password,
         "weight": 1.0,
         "status": "active",
-        "ipstack": "dual",
+        "ipstack": "dual" if remote_ipv6 else "v4",
         "version": tag.lstrip("v"),
         "metrics": {"rtt_ms": 0, "loss_pct": 0.0, "speed_mbps": 0},
     })
