@@ -4694,6 +4694,21 @@ def generate_xray_config_chain_entry_multi() -> None:
                 info("Mode B + AWG: нет VLESS exit-нод, используем AWG-конфиг...")
                 generate_xray_config()
             return
+        elif H2_EXIT_ENABLED:
+            # H2-режим: как и в AWG-ветке выше, exit-нод для VLESS-цепочки нет —
+            # Hysteria2-туннель на exit-VPS настраивается отдельно через меню 7
+            # и патчит outbound (тег "proxy") уже ПОСЛЕ того, как этот стандартный
+            # конфиг записан. Раньше для H2 эта ветка отсутствовала, и установка
+            # проваливалась в "Нет exit-нод — конфиг Entry Node не может быть
+            # создан", оставляя ноду вообще без config.json.
+            if PROTOCOL_MODE == "xhttp":
+                info("Mode B + H2 + xHTTP: нет VLESS exit-нод, используем xHTTP-конфиг...")
+                generate_xray_config_xhttp()
+            else:
+                info("Mode B + H2: нет VLESS exit-нод, используем стандартный конфиг "
+                     "(outbound будет переключён на H2 через меню 7)...")
+                generate_xray_config()
+            return
         else:
             warn("Нет exit-нод — конфиг Entry Node не может быть создан.")
             return
@@ -13381,7 +13396,9 @@ def do_full_install() -> None:
     # ── Финальная проверка: /etc/xray/config.json должен существовать ─────────
     _cfg_final = CONFIG_DIR / "config.json"
     _alt_cfg_final = Path("/usr/local/etc/xray/config.json")
+    _config_creation_failed = False
     if not _cfg_final.exists() and not _alt_cfg_final.exists():
+        _config_creation_failed = True
         log_to_file("ERROR",
             f"config.json НЕ СОЗДАН после установки! "
             f"Ожидался: {_cfg_final}. "
@@ -13547,7 +13564,16 @@ def do_full_install() -> None:
     print()
     _box_row(f"{GREEN}Сайт-заглушка: {BOLD}https://{PARAM_DOMAIN}{NC}")
 
-    log_to_file("SUCCESS", f"=== Установка завершена успешно за {install_dur}с (Режим {INSTALL_MODE}, {PROTOCOL_MODE}) ===")
+    if _config_creation_failed:
+        # Раньше тут безусловно печаталось "завершена успешно", даже когда
+        # чуть выше уже было сказано [КРИТИЧНО] config.json не создан —
+        # пользователь не понимал, что установка реально провалилась.
+        error(f"=== Установка Режима {INSTALL_MODE} ПРЕРВАНА: config.json не создан "
+              f"(см. [КРИТИЧНО] выше) за {install_dur}с ===")
+        log_to_file("ERROR", f"=== Установка ПРЕРВАНА (config.json не создан) "
+                              f"за {install_dur}с (Режим {INSTALL_MODE}, {PROTOCOL_MODE}) ===")
+    else:
+        log_to_file("SUCCESS", f"=== Установка завершена успешно за {install_dur}с (Режим {INSTALL_MODE}, {PROTOCOL_MODE}) ===")
 
     # Сигнализируем exit-trap что установка завершена нормально
     global INSTALL_COMPLETED
