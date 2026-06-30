@@ -134,25 +134,25 @@ def _build_h2_outbound(
     tag: str = "proxy",
     cert_sha256: str = "",
     sni: Optional[str] = None,
-    enable_mux: bool = True,
 ) -> dict:
     """
     Строит Xray outbound для Hysteria2.
 
-    ВАЖНО: в Xray-core протокол называется "hysteria" (не "hysteria2"!), а
-    версия 2 указывается явно полем "version" — и в settings (на уровне
-    протокола), и продублирована в streamSettings.hysteriaSettings. Без
-    "version": 2 Xray трактует конфиг как Hysteria v1 (полностью удалён из
-    актуальных сборок Xray-core) и падает с "unknown config id" / валидацией.
-    Источник схемы: infra/conf/hysteria.go в XTLS/Xray-core (network: "hysteria",
-    settings.version + streamSettings.hysteriaSettings.version).
+    Схема строго по официальной документации XTLS/Xray-core и подтверждённым
+    рабочим конфигам из issue-трекера (issues #5619, #5911, #5921):
 
-    TLS: поле "allowInsecure" с июня 2026 полностью убрано из Xray-core
-    ("The feature 'allowInsecure' has been removed and migrated to
-    'pinnedPeerCertSha256'"). Для самоподписанного сертификата exit-ноды
-    нужно явно пиннить его SHA256-отпечаток вместо отключения проверки —
-    отпечаток считается при установке H2 (см. h2_cert_sha256_local() /
-    удалённую установку по SSH) и хранится в state.json у каждой exit-ноды.
+    1. protocol: "hysteria" (не "hysteria2"!) + settings.version: 2
+    2. streamSettings.network: "hysteria"
+    3. streamSettings.security: "tls" + tlsSettings.serverName
+       - pinnedPeerCertSha256 для самоподписанных сертификатов
+       - alpn НЕ указываем — Xray/QUIC-стек выставляет его сам (h3)
+    4. streamSettings.hysteriaSettings.version: 2 (обязательно)
+    5. streamSettings.hysteriaSettings.auth: пароль
+    6. streamSettings.hysteriaSettings.up/down: ОБЯЗАТЕЛЬНЫ для хэндшейка
+       с официальным Hysteria2-сервером (apernet/hysteria) — без них
+       сервер не завершает QUIC-хэндшейк и клиент получает timeout.
+    7. mux НЕ используется — несовместим с QUIC (Hysteria2 сам мультиплексирует
+       потоки поверх одного QUIC-соединения).
     """
     ipv6 = _is_ipv6(exit_ip)
     server_addr = _bracket(exit_ip) if ipv6 else exit_ip
@@ -164,10 +164,10 @@ def _build_h2_outbound(
         tls_settings["pinnedPeerCertSha256"] = cert_sha256
     else:
         warn("Нет сохранённого SHA256-отпечатка сертификата exit-ноды — "
-             "TLS-валидация, скорее всего, провалится. Переустановите H2 "
-             "на exit-ноде (меню 7 → 1/2), чтобы отпечаток сохранился.")
+             "TLS-валидация провалится. Переустановите H2 на exit-ноде "
+             "(меню 7 → 1/2), чтобы отпечаток сохранился в state.json.")
 
-    outbound = {
+    return {
         "tag": tag,
         "protocol": "hysteria",
         "settings": {
@@ -182,15 +182,17 @@ def _build_h2_outbound(
             "hysteriaSettings": {
                 "version": 2,
                 "auth": auth_password,
+                # up/down обязательны для хэндшейка с официальным Hysteria2-сервером.
+                # Без них apernet/hysteria не завершает QUIC Initial и клиент
+                # получает "timeout: no recent network activity" несмотря на то,
+                # что пакеты физически доходят до сервера (видно в tcpdump/iptables).
+                "up": "100mbps",
+                "down": "300mbps",
                 "udpIdleTimeout": 60,
             },
         },
+        # mux намеренно не добавляется — Hysteria2/QUIC сам мультиплексирует потоки.
     }
-    if enable_mux:
-        # Мультиплексирование уменьшает накладные расходы на установление
-        # новых QUIC-потоков при множестве параллельных соединений клиента.
-        outbound["mux"] = {"enabled": True, "concurrency": 8}
-    return outbound
 
 
 def _find_proxy_outbound_idx(cfg: dict, tag: str = "proxy") -> int:
