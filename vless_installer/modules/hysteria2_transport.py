@@ -161,7 +161,7 @@ def _build_h2_outbound(
         "serverName": sni or exit_ip,
     }
     if cert_sha256:
-        tls_settings["pinnedPeerCertSha256"] = [cert_sha256]
+        tls_settings["pinnedPeerCertSha256"] = cert_sha256
     else:
         warn("Нет сохранённого SHA256-отпечатка сертификата exit-ноды — "
              "TLS-валидация, скорее всего, провалится. Переустановите H2 "
