@@ -557,6 +557,73 @@ def _generate_systemd_remote() -> str:
 
 
 # ── Интерактивное меню ────────────────────────────────────────────────────────
+def _h2_remote_status(host: str, ssh_key: Optional[str], ssh_pass: Optional[str]) -> dict:
+    """
+    Реальная проверка статуса H2 на удалённой ноде по SSH — в отличие от
+    h2_exit_status(), которая всегда смотрит только на ЭТУ (локальную) ноду.
+    """
+    if ssh_pass and not _h2_ensure_sshpass():
+        return {"error": "sshpass недоступен"}
+    ssh_opts = ["-o", "StrictHostKeyChecking=no", "-o", "ConnectTimeout=10"]
+    if ssh_key:
+        ssh_opts += ["-i", ssh_key]
+    remote_cmd = (
+        f"systemctl is-active {H2_SERVICE} 2>/dev/null; "
+        f"echo '---'; "
+        f"/usr/local/bin/hysteria version 2>/dev/null | head -1; "
+        f"echo '---'; "
+        f"tail -n 5 /var/log/hysteria.log 2>/dev/null"
+    )
+    ssh_cmd = ["ssh"] + ssh_opts + [f"root@{host}", remote_cmd]
+    if ssh_pass:
+        ssh_cmd = ["sshpass", "-p", ssh_pass] + ssh_cmd
+    r = _run(ssh_cmd, capture=True, timeout=20, check=False)
+    if r.returncode != 0 and not r.stdout:
+        return {"error": f"SSH недоступен: {r.stderr[:200]}"}
+    parts = r.stdout.split("---")
+    return {
+        "active": (parts[0].strip() if len(parts) > 0 else ""),
+        "version": (parts[1].strip() if len(parts) > 1 else ""),
+        "log_tail": (parts[2].strip() if len(parts) > 2 else ""),
+    }
+
+
+def _interactive_remote_status() -> None:
+    h2 = _load_h2_state()
+    nodes = h2.get("exit_nodes", [])
+    default_host = nodes[0]["ip"] if nodes else ""
+    host = input(f"  IP/домен удалённой Exit-ноды [{default_host}]: ").strip() or default_host
+    if not host:
+        warn("IP не указан")
+        time.sleep(1)
+        return
+    ssh_key = input("  Путь к SSH-ключу (пусто = пароль): ").strip() or None
+    ssh_pass = None
+    if not ssh_key:
+        ssh_pass = getpass.getpass("  SSH-пароль: ").strip() or None
+    st = _h2_remote_status(host, ssh_key, ssh_pass)
+    os.system("clear")
+    print()
+    _box_top(f"📊  СТАТУС УДАЛЁННОЙ EXIT-НОДЫ {host}")
+    if "error" in st:
+        _box_row(f"  {RED}{st['error']}{NC}")
+    else:
+        active_col = GREEN if st["active"] == "active" else RED
+        _box_row(f"  {CYAN}active:{NC}  {active_col}{st['active'] or '—'}{NC}")
+        _box_row(f"  {CYAN}version:{NC}  {st['version'] or '—'}")
+        _box_row()
+        _box_row(f"  {CYAN}последние строки лога:{NC}")
+        for line in (st["log_tail"] or "(пусто)").splitlines():
+            _box_row(f"  {DIM}{line}{NC}")
+    _box_row()
+    _box_item_exit("0", "← Назад")
+    _box_bottom()
+    try:
+        input(f"{CYAN}Нажмите Enter...{NC}")
+    except KeyboardInterrupt:
+        pass
+
+
 def do_h2_exit_menu() -> None:
     """
     Интерактивное меню управления Exit-нодой Hysteria2.
@@ -574,10 +641,11 @@ def do_h2_exit_menu() -> None:
         _box_row()
         _box_item("1", "Установить H2 (локально — эта нода)")
         _box_item("2", "Установить H2 на удалённую Exit-ноду (SSH)")
-        _box_item("3", "Статус сервиса")
-        _box_item("4", "Перезапустить сервис")
-        _box_item("5", f"Показать конфиг  {DIM}({H2_CONFIG_FILE}){NC}")
-        _box_item("6", f"Удалить H2 с этой ноды  {DIM}(⚠️  необратимо){NC}")
+        _box_item("3", f"Статус сервиса  {DIM}(локально, эта нода){NC}")
+        _box_item("4", f"Перезапустить сервис  {DIM}(локально, эта нода){NC}")
+        _box_item("5", f"Показать конфиг  {DIM}(локально: {H2_CONFIG_FILE}){NC}")
+        _box_item("6", f"Удалить H2 с этой ноды  {DIM}(⚠️  необратимо, локально){NC}")
+        _box_item("7", f"Статус удалённой Exit-ноды  {DIM}(SSH){NC}")
         _box_row()
         _box_item_exit("Q", "← Назад")
         _box_bottom()
@@ -635,6 +703,8 @@ def do_h2_exit_menu() -> None:
             if confirm == "y":
                 h2_exit_remove()
                 input(f"\n{CYAN}Нажмите Enter...{NC}")
+        elif ch == "7":
+            _interactive_remote_status()
         elif ch in ("Q", ""):
             break
         else:
