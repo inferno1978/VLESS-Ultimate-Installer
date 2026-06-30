@@ -52,8 +52,9 @@ def _h2_status_line() -> str:
     """Возвращает однострочный статус H2 для шапки меню."""
     h2        = _load_h2_state()
     enabled   = h2.get("enabled", False)
-    active    = _service_active(H2_SERVICE)
-    ver       = _h2_binary_version() if _h2_binary_exists() else "—"
+    has_local = _h2_binary_exists()
+    active    = _service_active(H2_SERVICE) if has_local else False
+    ver       = _h2_binary_version() if has_local else "—"
     nodes     = h2.get("exit_nodes", [])
     n_live    = sum(1 for n in nodes if n.get("status") == "active")
     n_total   = len(nodes)
@@ -62,8 +63,18 @@ def _h2_status_line() -> str:
     if not enabled:
         return f"{YELLOW}не установлен{NC}"
 
-    svc_col = GREEN if active else RED
-    svc_str = f"{svc_col}{'активен' if active else 'DOWN'}{NC}"
+    # На Entry-ноде без локального H2-сервера (Exit поднят удалённо) проверка
+    # systemd-юнита hysteria-server бессмысленна — он тут и не должен быть
+    # установлен. Раньше это всегда показывалось как пугающий красный DOWN,
+    # хотя транспорт реально активен через удалённую exit-ноду.
+    if has_local:
+        svc_col = GREEN if active else RED
+        svc_str = f"{svc_col}{'активен' if active else 'DOWN'}{NC}"
+    else:
+        remote_ok = n_live > 0
+        svc_col = GREEN if remote_ok else YELLOW
+        svc_str = (f"{svc_col}{'remote OK' if remote_ok else 'нет локального H2'}{NC}")
+
     return (
         f"v{ver}  │  Сервис: {svc_str}  │  "
         f"Ноды: {GREEN}{n_live}{NC}/{n_total}  │  "
