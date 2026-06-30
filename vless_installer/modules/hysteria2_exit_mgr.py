@@ -474,9 +474,10 @@ def h2_exit_remote_install(
         f"mv /tmp/hysteria.bin /usr/local/bin/hysteria && chmod +x /usr/local/bin/hysteria || "
         f"{{ echo 'ERROR: hysteria binary is not ELF (wrong arch or GitHub unreachable)'; "
         f"rm -f /tmp/hysteria.bin; exit 1; }}",
-        "mkdir -p /etc/hysteria",
+        "mkdir -p /etc/hysteria /etc/xray",
         f"openssl req -x509 -newkey rsa:4096 -keyout /etc/xray/hysteria.key "
-        f"-out /etc/xray/hysteria.crt -days 3650 -nodes -subj '/CN=hysteria2.local' 2>/dev/null",
+        f"-out /etc/xray/hysteria.crt -days 3650 -nodes -subj '/CN=hysteria2.local' "
+        f"|| echo 'ERROR: openssl не смог создать сертификат'",
         _generate_systemd_remote(),
         f"systemctl daemon-reload && systemctl enable --now {H2_SERVICE}",
     ] + [f"iptables -I INPUT -p udp --dport {p} -j ACCEPT" for p in ports]
