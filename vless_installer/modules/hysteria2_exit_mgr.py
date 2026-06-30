@@ -65,16 +65,31 @@ def _h2_latest_url() -> str:
     try:
         r = _run(["curl", "-s", "--max-time", "15", _GH_API], capture=True)
         data = json.loads(r.stdout)
+        wanted = f"hysteria-linux-{arch}"
         for asset in data.get("assets", []):
             n = asset.get("name", "")
-            if f"linux-{arch}" in n and n.endswith(".bin"):
+            # Актуальные релизы Hysteria2 называют линуксовые бинарники без
+            # расширения (например "hysteria-linux-amd64"), .exe есть только
+            # у Windows-сборок. Сравниваем точное имя, а не подстроку,
+            # чтобы не зацепить "hysteria-linux-amd64-avx".
+            if n == wanted:
+                return asset["browser_download_url"], data.get("tag_name", "")
+        # Точного совпадения не нашли (например, поменялась схема имён) —
+        # берём первый ассет, содержащий нужную архитектуру, но НЕ являющийся
+        # Windows/исходниками.
+        for asset in data.get("assets", []):
+            n = asset.get("name", "")
+            if f"linux-{arch}" in n and not n.endswith((".exe", ".txt", ".sha256")):
                 return asset["browser_download_url"], data.get("tag_name", "")
     except Exception:
         pass
-    tag = "v2.6.0"
+    # Фоллбэк используется только если GitHub API недоступен (rate-limit,
+    # сеть). Актуальный тег релиза имеет вид "app/vX.Y.Z", а линуксовые
+    # бинарники начиная с 2.9.x не имеют расширения ".bin".
+    tag = "app/v2.9.3"
     return (
         f"https://github.com/apernet/hysteria/releases/download/{tag}/"
-        f"hysteria-linux-{arch}.bin",
+        f"hysteria-linux-{arch}",
         tag,
     )
 
@@ -389,16 +404,22 @@ def h2_exit_remote_install(
     try:
         _gr = _run(["curl", "-s", "--max-time", "15", _GH_API], capture=True)
         _gdata = json.loads(_gr.stdout)
-        tag = _gdata.get("tag_name", "v2.6.0")
+        tag = _gdata.get("tag_name", "app/v2.9.3")
+        _wanted = f"hysteria-linux-{arch}"
+        _assets = _gdata.get("assets", [])
         url = next(
-            (a["browser_download_url"] for a in _gdata.get("assets", [])
-             if f"linux-{arch}" in a.get("name", "") and a["name"].endswith(".bin")),
-            f"https://github.com/apernet/hysteria/releases/download/{tag}/hysteria-linux-{arch}.bin",
+            (a["browser_download_url"] for a in _assets if a.get("name") == _wanted),
+            None,
+        ) or next(
+            (a["browser_download_url"] for a in _assets
+             if f"linux-{arch}" in a.get("name", "")
+             and not a["name"].endswith((".exe", ".txt", ".sha256"))),
+            f"https://github.com/apernet/hysteria/releases/download/{tag}/hysteria-linux-{arch}",
         )
     except Exception:
-        tag = "v2.6.0"
+        tag = "app/v2.9.3"
         url = (f"https://github.com/apernet/hysteria/releases/download/{tag}/"
-               f"hysteria-linux-{arch}.bin")
+               f"hysteria-linux-{arch}")
 
     commands = [
         # -f: curl вернёт ошибку при HTTP >= 400; xxd проверяет ELF magic
