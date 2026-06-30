@@ -28,6 +28,7 @@ from __future__ import annotations
 import getpass
 import json
 import os
+import re
 import secrets
 import subprocess
 import sys
@@ -570,7 +571,7 @@ def _h2_remote_status(host: str, ssh_key: Optional[str], ssh_pass: Optional[str]
     remote_cmd = (
         f"systemctl is-active {H2_SERVICE} 2>/dev/null; "
         f"echo '---'; "
-        f"/usr/local/bin/hysteria version 2>/dev/null | head -1; "
+        f"/usr/local/bin/hysteria version 2>&1; "
         f"echo '---'; "
         f"tail -n 5 /var/log/hysteria.log 2>/dev/null"
     )
@@ -581,9 +582,11 @@ def _h2_remote_status(host: str, ssh_key: Optional[str], ssh_pass: Optional[str]
     if r.returncode != 0 and not r.stdout:
         return {"error": f"SSH недоступен: {r.stderr[:200]}"}
     parts = r.stdout.split("---")
+    _ver_raw = parts[1].strip() if len(parts) > 1 else ""
+    _ver_match = re.search(r"v?(\d+\.\d+\.\d+)", _ver_raw)
     return {
         "active": (parts[0].strip() if len(parts) > 0 else ""),
-        "version": (parts[1].strip() if len(parts) > 1 else ""),
+        "version": (_ver_match.group(1) if _ver_match else ""),
         "log_tail": (parts[2].strip() if len(parts) > 2 else ""),
     }
 
