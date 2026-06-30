@@ -133,40 +133,53 @@ def _build_h2_outbound(
     auth_password: str,
     tag: str = "proxy",
     insecure: bool = True,
+    sni: Optional[str] = None,
+    enable_mux: bool = True,
 ) -> dict:
     """
-    Строит Xray outbound с VLESS + hysteria2 transport.
-    Клиент не видит транспорт — sniffing и inbound не меняются.
+    Строит Xray outbound для Hysteria2.
+
+    ВАЖНО: в Xray-core протокол называется "hysteria" (не "hysteria2"!), а
+    версия 2 указывается явно полем "version" — и в settings (на уровне
+    протокола), и продублирована в streamSettings.hysteriaSettings. Без
+    "version": 2 Xray трактует конфиг как Hysteria v1 (полностью удалён из
+    актуальных сборок Xray-core) и падает с "unknown config id" / валидацией.
+    Источник схемы: infra/conf/hysteria.go в XTLS/Xray-core (network: "hysteria",
+    settings.version + streamSettings.hysteriaSettings.version).
     """
     ipv6 = _is_ipv6(exit_ip)
     server_addr = _bracket(exit_ip) if ipv6 else exit_ip
 
-    # Xray поддерживает Hysteria2 как отдельный протокол outbound
-    # (не через streamSettings) начиная с Xray 24.x
-    # Для совместимости строим VLESS outbound с hysteria2 в network
-    # Формат: outbound type=hysteria2 (нативный Xray)
     outbound = {
-        "protocol": "hysteria2",
         "tag": tag,
+        "protocol": "hysteria",
         "settings": {
-            "servers": [
-                {
-                    "address": server_addr,
-                    "port": exit_port,
-                    "password": auth_password,
-                    "congestion_control": "bbr",
-                }
-            ]
+            "version": 2,
+            "address": server_addr,
+            "port": exit_port,
         },
         "streamSettings": {
-            "network": "raw",
+            "network": "hysteria",
             "security": "tls",
             "tlsSettings": {
-                "insecure": insecure,
-                "alpn": ["h3"],
+                # Если на exit-ноде валидный сертификат (certbot) — лучше
+                # передавать реальный SNI; при самоподписанном сертификате
+                # (insecure=True) serverName не проверяется и можно оставить
+                # IP/домен exit-ноды как есть.
+                "serverName": sni or exit_ip,
+                "allowInsecure": insecure,
+            },
+            "hysteriaSettings": {
+                "version": 2,
+                "auth": auth_password,
+                "udpIdleTimeout": 60,
             },
         },
     }
+    if enable_mux:
+        # Мультиплексирование уменьшает накладные расходы на установление
+        # новых QUIC-потоков при множестве параллельных соединений клиента.
+        outbound["mux"] = {"enabled": True, "concurrency": 8}
     return outbound
 
 
@@ -351,11 +364,14 @@ def h2_transport_status() -> dict:
         if idx >= 0:
             ob = cfg["outbounds"][idx]
             proto = ob.get("protocol", "")
-            if proto == "hysteria2":
+            # ВАЖНО: правильное имя протокола в Xray-core — "hysteria"
+            # (не "hysteria2"), см. _build_h2_outbound(). Раньше эта проверка
+            # сверялась со старым (ошибочным) именем и никогда не срабатывала.
+            if proto == "hysteria":
                 active = "hysteria2"
-                srv = ob.get("settings", {}).get("servers", [{}])[0]
-                exit_ip   = srv.get("address", "")
-                exit_port = srv.get("port", 0)
+                settings = ob.get("settings", {})
+                exit_ip   = settings.get("address", "")
+                exit_port = settings.get("port", 0)
             elif proto in ("vless", "vmess", "freedom"):
                 active = proto
             else:
