@@ -370,6 +370,30 @@ def h2_exit_status() -> dict:
 
 
 # ── Remote install через SSH ──────────────────────────────────────────────────
+# ── SSH-пароль: проверка/установка sshpass ────────────────────────────────────
+def _h2_has_sshpass() -> bool:
+    return _run(["which", "sshpass"], capture=True).returncode == 0
+
+
+def _h2_ensure_sshpass() -> bool:
+    """
+    Проверяет наличие sshpass и при отсутствии пытается установить его через
+    apt-get. Тот же паттерн, что в cluster_ops._ensure_sshpass_installed()
+    и hysteria2_cluster._ensure_sshpass() — нужен, чтобы парольный SSH-доступ
+    к удалённой Exit-ноде не валился необработанным FileNotFoundError.
+    """
+    if _h2_has_sshpass():
+        return True
+    info("sshpass не найден, устанавливаю...")
+    r = _run(["apt-get", "install", "-y", "-q", "sshpass"], capture=True)
+    if r.returncode == 0 and _h2_has_sshpass():
+        success("sshpass установлен")
+        return True
+    error("Не удалось установить sshpass автоматически. "
+          "Установите вручную: apt-get install -y sshpass")
+    return False
+
+
 def h2_exit_remote_install(
     host: str,
     ssh_key: Optional[str] = None,
@@ -386,6 +410,12 @@ def h2_exit_remote_install(
         ports = [443]
     if not auth_password:
         auth_password = secrets.token_urlsafe(24)
+
+    # Если выбрана парольная аутентификация — sshpass обязателен.
+    # Проверяем/доустанавливаем его ДО первого вызова, иначе при отсутствии
+    # пакета упадём с необработанным FileNotFoundError (как раньше).
+    if ssh_pass and not _h2_ensure_sshpass():
+        return False
 
     # Определяем архитектуру удалённой машины, а не локальной
     ssh_opts_pre = ["-o", "StrictHostKeyChecking=no", "-o", "ConnectTimeout=15"]
