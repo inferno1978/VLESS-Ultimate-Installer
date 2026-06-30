@@ -149,6 +149,49 @@ def _find_proxy_outbound_idx(cfg: dict, tag: str = "proxy") -> int:
     return -1
 
 
+# ── BUGFIX: routing catch-all не указывал на H2-outbound ──────────────────────
+# Проблема: generate_xray_config() / generate_xray_config_chain_entry_multi()
+# (ветка H2_EXIT_ENABLED без VLESS exit-нод) ставят catch-all routing-правило
+# {"network": "tcp,udp", "outboundTag": "direct"} или "chain-exit".
+# h2_transport_apply() добавлял outbound с тегом "proxy", но НЕ трогал routing —
+# в итоге весь трафик продолжал уходить через "direct"/"chain-exit" (т.е. с
+# Entry-ноды напрямую или по старому транспорту), Hysteria2-outbound был
+# "осиротевшим" и никогда не использовался. Снаружи это выглядело так, будто
+# Hysteria2 "включился" (success-сообщение), но IP-чекеры показывали Entry IP,
+# а не Exit IP — трафик реально никогда не покидал Entry-ноду через H2.
+def _find_catchall_rule(cfg: dict) -> Optional[dict]:
+    """
+    Находит routing-правило catch-all (network: tcp,udp), которое НЕ относится
+    к loopback (127.0.0.1/::1) и НЕ является BLOCK-правилом. Это правило
+    определяет, куда уходит "весь остальной" трафик клиентов.
+    """
+    rules = cfg.get("routing", {}).get("rules", [])
+    for rule in rules:
+        if rule.get("type") != "field":
+            continue
+        net = rule.get("network", "")
+        if "tcp" in net and "udp" in net and not rule.get("ip") and not rule.get("protocol"):
+            if rule.get("outboundTag") != "BLOCK":
+                return rule
+    return None
+
+
+def _patch_routing_to_proxy(cfg: dict, tag: str = "proxy") -> tuple[bool, str]:
+    """
+    Переключает catch-all routing-правило на outboundTag=tag (по умолчанию "proxy"),
+    запоминая предыдущий тег, чтобы h2_transport_remove() мог откатить.
+    Возвращает (изменено?, предыдущий_тег).
+    """
+    rule = _find_catchall_rule(cfg)
+    if rule is None:
+        return False, ""
+    prev_tag = rule.get("outboundTag", "")
+    if prev_tag == tag:
+        return False, prev_tag
+    rule["outboundTag"] = tag
+    return True, prev_tag
+
+
 def h2_transport_apply(
     exit_ip: str = "",
     exit_port: int = 443,
@@ -195,6 +238,20 @@ def h2_transport_apply(
         cfg.setdefault("outbounds", []).insert(0, new_ob)
         info("Добавляю новый Hysteria2 outbound")
 
+    # BUGFIX: без этого catch-all routing-правило продолжало указывать на
+    # "direct"/"chain-exit", и новый outbound "proxy" никогда не использовался —
+    # весь трафик уходил с Entry-ноды напрямую, минуя Exit. Переключаем
+    # catch-all правило на наш тег и запоминаем предыдущий для отката.
+    changed, prev_tag = _patch_routing_to_proxy(cfg, tag="proxy")
+    if changed:
+        h2["_prev_routing_tag"] = prev_tag
+        info(f"Routing catch-all переключён: {prev_tag} → proxy")
+    elif prev_tag:
+        info("Routing catch-all уже указывает на proxy — пропускаю")
+    else:
+        warn("Не найдено catch-all routing-правило (network: tcp,udp) — "
+             "проверьте config.json вручную, Hysteria2-outbound может быть не задействован!")
+
     if not _save_xray_config(cfg):
         return False
 
@@ -221,6 +278,7 @@ def h2_transport_remove() -> bool:
         return False
 
     prev_ob = h2.pop("_prev_outbound", None)
+    prev_routing_tag = h2.pop("_prev_routing_tag", None)
     idx = _find_proxy_outbound_idx(cfg)
 
     if idx >= 0:
@@ -230,6 +288,15 @@ def h2_transport_remove() -> bool:
         else:
             cfg["outbounds"].pop(idx)
             info("Hysteria2 outbound удалён")
+
+    # BUGFIX: откатываем catch-all routing-правило обратно на тег,
+    # который был до включения H2 (обычно "direct" или "chain-exit"),
+    # иначе после удаления outbound "proxy" весь трафик уйдёт в blackhole/EOF.
+    if prev_routing_tag:
+        rule = _find_catchall_rule(cfg)
+        if rule is not None:
+            rule["outboundTag"] = prev_routing_tag
+            info(f"Routing catch-all восстановлен: proxy → {prev_routing_tag}")
 
     if not _save_xray_config(cfg):
         return False

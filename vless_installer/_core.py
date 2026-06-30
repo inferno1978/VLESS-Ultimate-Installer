@@ -4661,6 +4661,38 @@ def _prompt_one_node_manual(index: int) -> dict | None:
     return node
 
 
+def _h2_reapply_transport_if_active() -> None:
+    """
+    BUGFIX: generate_xray_config_chain_entry_multi() / generate_xray_config() /
+    generate_xray_config_xhttp() полностью перезаписывают config.json, включая
+    outbounds и routing. Если на момент вызова транспорт Hysteria2 уже был
+    активирован пользователем через меню 7 (h2_transport_apply), такая
+    перезапись "осиротевала" H2-outbound и откатывала catch-all routing-правило
+    обратно на "direct"/"chain-exit" — трафик начинал молча течь с Entry-ноды
+    напрямую, минуя Exit, до следующего ручного переключения транспорта.
+    Эта функция не меняет поведение, если H2 не был активен — это no-op.
+    """
+    try:
+        from vless_installer.modules.hysteria2_common import _load_h2_state
+        h2 = _load_h2_state()
+        if h2.get("active_transport") != "hysteria2":
+            return
+        nodes = [n for n in h2.get("exit_nodes", []) if n.get("status") == "active"]
+        if not nodes:
+            return
+        from vless_installer.modules.hysteria2_transport import h2_transport_apply
+        node = nodes[0]
+        ok = h2_transport_apply(
+            exit_ip=node["ip"],
+            exit_port=node.get("ports", [443])[0],
+            auth_password=node.get("auth", ""),
+        )
+        if ok:
+            info("Hysteria2-транспорт переприменён после регенерации config.json")
+    except Exception as e:
+        warn(f"Не удалось переприменить Hysteria2-транспорт после регенерации: {e}")
+
+
 def generate_xray_config_chain_entry_multi() -> None:
     """
     Аналог generate_xray_config_chain_entry(), но поддерживает несколько
@@ -4708,6 +4740,7 @@ def generate_xray_config_chain_entry_multi() -> None:
                 info("Mode B + H2: нет VLESS exit-нод, используем стандартный конфиг "
                      "(outbound будет переключён на H2 через меню 7)...")
                 generate_xray_config()
+            _h2_reapply_transport_if_active()
             return
         else:
             warn("Нет exit-нод — конфиг Entry Node не может быть создан.")
@@ -5031,6 +5064,7 @@ def generate_xray_config_chain_entry_multi() -> None:
     else:
         warn("Конфигурация создана с предупреждением")
         log_to_file("WARN", r.stderr[-1000:] if r.stderr else "")
+    _h2_reapply_transport_if_active()
 
 
 def do_change_domain_strategy() -> None:
