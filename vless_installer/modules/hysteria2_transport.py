@@ -54,7 +54,27 @@ _STATE_FILE = Path("/var/lib/xray-installer/state.json")
 
 
 def _find_xray_config() -> Optional[Path]:
-    for p in (_XRAY_CONFIG, _XRAY_CONFIG_ALT):
+    """
+    BUGFIX: каноническая директория конфига в _core.py — CONFIG_DIR =
+    Path("/etc/xray"); именно туда пишется config.json при генерации,
+    и именно этот путь передаётся в systemd unit (ExecStart=... -config
+    /etc/xray/config.json). /usr/local/etc/xray/config.json создаётся
+    в generate_xray_config_chain_entry_multi()/generate_xray_config()
+    лишь как СИМЛИНК на /etc/xray/config.json — для обратной совместимости.
+
+    Раньше эта функция проверяла /usr/local/etc/xray/config.json первым.
+    Поскольку симлинк "существует", он совпадал — и _save_xray_config()
+    писал именно туда через tmp.replace(p), что атомарно ПОДМЕНЯЕТ сам
+    симлинк обычным файлом (поведение os.rename для символьных ссылок).
+    В результате патч уходил в "осиротевшую" копию конфига, а реальный
+    /etc/xray/config.json, который читает запущенный Xray, не менялся
+    вообще — Hysteria2-транспорт молча не применялся к живому процессу.
+
+    Теперь проверяем /etc/xray/config.json (реальный, используемый Xray)
+    первым; /usr/local/etc/xray/config.json — только как fallback для
+    нестандартных инсталляций, где основной путь отличается.
+    """
+    for p in (_XRAY_CONFIG_ALT, _XRAY_CONFIG):
         if p.exists():
             return p
     return None
@@ -72,15 +92,24 @@ def _load_xray_config() -> Optional[dict]:
 
 
 def _save_xray_config(cfg: dict) -> bool:
+    """
+    BUGFIX: если найденный путь — символическая ссылка (например,
+    /usr/local/etc/xray/config.json -> /etc/xray/config.json), пишем
+    в файл, на который она указывает (p.resolve()), а не заменяем
+    саму ссылку обычным файлом. Иначе при повторном запуске
+    /usr/local/etc/xray/config.json и /etc/xray/config.json молча
+    расходятся, и неясно, какой из них реально использует Xray.
+    """
     p = _find_xray_config()
     if not p:
-        p = _XRAY_CONFIG
+        p = _XRAY_CONFIG_ALT
+    target = p.resolve() if p.is_symlink() else p
     try:
-        p.parent.mkdir(parents=True, exist_ok=True)
+        target.parent.mkdir(parents=True, exist_ok=True)
         # Атомарная запись через tmp
-        tmp = p.with_suffix(".tmp")
+        tmp = target.with_suffix(".tmp")
         tmp.write_text(json.dumps(cfg, indent=2, ensure_ascii=False))
-        tmp.replace(p)
+        tmp.replace(target)
         return True
     except Exception as e:
         error(f"Не удалось сохранить xray config: {e}")
