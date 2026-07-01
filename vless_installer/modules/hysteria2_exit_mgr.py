@@ -241,17 +241,58 @@ def _ensure_h2_cert(domain: str = "") -> tuple[str, str]:
             return str(H2_CERT_FILE), str(H2_KEY_FILE)
         warn("certbot не смог получить сертификат, генерирую самоподписанный")
 
-    info("Генерирую самоподписанный TLS-сертификат...")
-    _run([
+    info("Генерирую самоподписанный TLS-сертификат (leaf, CA:FALSE)...")
+    # BUGFIX: openssl req -x509 без дополнительных расширений создаёт
+    # сертификат с Basic Constraints: CA=TRUE. Xray-core 26.x при
+    # использовании pinnedPeerCertSha256 падает с ошибкой TLS-валидации,
+    # не доходя до проверки SHA256-пина, если сервер возвращает CA-сертификат
+    # как конечный (issue XTLS/Xray-core #5904, #5655). Пакеты физически
+    # доходят до exit-ноды (видно в tcpdump), но Xray молча рвёт хендшейк,
+    # сервер не отвечает — клиент получает EOF/timeout.
+    # Решение: явно задаём basicConstraints=CA:FALSE + keyUsage + EKU,
+    # чтобы получить настоящий leaf-сертификат, который Xray принимает.
+    cn = domain or "hysteria2.local"
+    r = _run([
         "openssl", "req", "-x509", "-newkey", "rsa:4096",
         "-keyout", str(H2_KEY_FILE),
         "-out", str(H2_CERT_FILE),
         "-days", "3650", "-nodes",
-        "-subj", f"/CN={domain or 'hysteria2.local'}",
-    ], quiet=True)
+        "-subj", f"/CN={cn}",
+        "-addext", "basicConstraints=CA:FALSE",
+        "-addext", "keyUsage=digitalSignature,keyEncipherment",
+        "-addext", "extendedKeyUsage=serverAuth",
+    ], quiet=True, check=False)
+    if r.returncode != 0:
+        # Фоллбэк для старых OpenSSL < 1.1.1 (без поддержки -addext):
+        # генерируем через внешний extfile
+        warn("openssl не поддерживает -addext, генерирую leaf через extfile...")
+        import tempfile
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".ext", delete=False) as f:
+            f.write("basicConstraints=CA:FALSE\n"
+                    "keyUsage=digitalSignature,keyEncipherment\n"
+                    "extendedKeyUsage=serverAuth\n")
+            ext_path = f.name
+        _run([
+            "openssl", "req", "-x509", "-newkey", "rsa:4096",
+            "-keyout", str(H2_KEY_FILE),
+            "-out", str(H2_CERT_FILE),
+            "-days", "3650", "-nodes",
+            "-subj", f"/CN={cn}",
+            "-extensions", "v3_req",
+            "-extfile", ext_path,
+        ], quiet=True)
+        Path(ext_path).unlink(missing_ok=True)
     H2_CERT_FILE.chmod(0o644)
     H2_KEY_FILE.chmod(0o600)
-    success(f"Самоподписанный сертификат → {H2_CERT_FILE}")
+    # Проверяем, что в итоге получили leaf, а не CA
+    _check = _run(["openssl", "x509", "-in", str(H2_CERT_FILE),
+                   "-noout", "-text"], capture=True, quiet=True, check=False)
+    if "CA:TRUE" in _check.stdout:
+        warn("Сгенерированный сертификат имеет CA:TRUE — "
+             "pinnedPeerCertSha256 в Xray-core 26.x может не работать "
+             "(обновите OpenSSL до 1.1.1+ на exit-ноде)")
+    else:
+        success(f"Leaf-сертификат (CA:FALSE) → {H2_CERT_FILE}")
     return str(H2_CERT_FILE), str(H2_KEY_FILE)
 
 
@@ -477,6 +518,14 @@ def h2_exit_remote_install(
         f"{{ echo 'ERROR: hysteria binary is not ELF (wrong arch or GitHub unreachable)'; "
         f"rm -f /tmp/hysteria.bin; exit 1; }}",
         "mkdir -p /etc/hysteria /etc/xray",
+        # BUGFIX: добавлены -addext для генерации leaf-сертификата (CA:FALSE).
+        # Без этого openssl создаёт CA-сертификат, который Xray-core 26.x
+        # отвергает при использовании pinnedPeerCertSha256 (issue #5904).
+        f"openssl req -x509 -newkey rsa:4096 -keyout /etc/xray/hysteria.key "
+        f"-out /etc/xray/hysteria.crt -days 3650 -nodes -subj '/CN=hysteria2.local' "
+        f"-addext 'basicConstraints=CA:FALSE' "
+        f"-addext 'keyUsage=digitalSignature,keyEncipherment' "
+        f"-addext 'extendedKeyUsage=serverAuth' 2>/dev/null || "
         f"openssl req -x509 -newkey rsa:4096 -keyout /etc/xray/hysteria.key "
         f"-out /etc/xray/hysteria.crt -days 3650 -nodes -subj '/CN=hysteria2.local' "
         f"|| echo 'ERROR: openssl не смог создать сертификат'",

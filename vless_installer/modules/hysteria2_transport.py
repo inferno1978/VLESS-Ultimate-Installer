@@ -1,29 +1,26 @@
 """
 vless_installer/modules/hysteria2_transport.py
 ───────────────────────────────────────────────────────────────────────────────
-Настройка Xray outbound на Entry-ноде для транспорта Hysteria2.
+Настройка транспорта Hysteria2 на Entry-ноде.
 
-Hysteria2 в контексте Xray — это транспортный уровень outbound:
-  Entry → (Hysteria2/QUIC/UDP) → Exit → Интернет
+АРХИТЕКТУРА (нативный клиент):
+  Клиент → Xray (VLESS inbound) → Xray (SOCKS5 outbound → 127.0.0.1:10809)
+           → hysteria2-клиент (нативный бинарь /usr/local/bin/hysteria)
+           → Exit-нода (hysteria2-сервер) → Интернет
 
-Клиент подключается по обычной VLESS-ссылке, прозрачно.
-Генерация VLESS-ссылок НЕ ЗАТРАГИВАЕТСЯ.
+Почему не Xray-built-in hysteria protocol:
+  Xray-core 26.x имеет документированные баги с нативным protocol:"hysteria"
+  (pinnedPeerCertSha256 + CA-сертификаты, up/down параметры, ALPN).
+  Нативный hysteria2-бинарь работает корректно с официальным сервером.
+  Для Xray это обычный SOCKS5-прокси — никаких специфичных зависимостей.
+
+Для клиента (VLESS-ссылки) ничего не меняется.
 
 Основные функции:
   • h2_transport_apply()    — применить H2 как транспорт для выбранной exit-ноды
   • h2_transport_remove()   — вернуть на AWG/VLESS транспорт
   • h2_transport_status()   — текущий активный транспорт
   • h2_select_transport()   — выбор AWG / H2 / оба (с весами)
-
-Xray конфиг patching использует тот же подход что xray_safe_apply.py.
-
-ВАЖНО: не модифицирует существующие функции генерации конфигов.
-Патч применяется только к outbound секции через прямую запись JSON.
-
-Точка входа из _core.py:
-    from vless_installer.modules.hysteria2_transport import (
-        h2_transport_apply, h2_transport_remove, h2_select_transport,
-    )
 ───────────────────────────────────────────────────────────────────────────────
 """
 from __future__ import annotations
@@ -41,6 +38,7 @@ from vless_installer.modules.hysteria2_common import (
     info, success, warn, error, log_to_file,
     _run, _load_h2_state, _save_h2_state, _ensure_h2_state,
     _tg_h2_event, _is_ipv6, _bracket,
+    H2_BINARY,
 )
 from vless_installer.modules.box_renderer import (
     _box_top, _box_row, _box_item, _box_item_exit, _box_sep,
@@ -48,31 +46,25 @@ from vless_installer.modules.box_renderer import (
 )
 
 
-_XRAY_CONFIG = Path("/usr/local/etc/xray/config.json")
+_XRAY_CONFIG     = Path("/usr/local/etc/xray/config.json")
 _XRAY_CONFIG_ALT = Path("/etc/xray/config.json")
-_STATE_FILE = Path("/var/lib/xray-installer/state.json")
+_STATE_FILE      = Path("/var/lib/xray-installer/state.json")
 
+# Нативный Hysteria2-клиент слушает SOCKS5 на этом адресе
+_H2_CLIENT_SOCKS_HOST = "127.0.0.1"
+_H2_CLIENT_SOCKS_PORT = 10809
+_H2_CLIENT_CONFIG     = Path("/etc/hysteria/client.yaml")
+_H2_CLIENT_SERVICE    = "hysteria-client"
+
+
+# ── Xray config helpers ───────────────────────────────────────────────────────
 
 def _find_xray_config() -> Optional[Path]:
     """
-    BUGFIX: каноническая директория конфига в _core.py — CONFIG_DIR =
-    Path("/etc/xray"); именно туда пишется config.json при генерации,
-    и именно этот путь передаётся в systemd unit (ExecStart=... -config
-    /etc/xray/config.json). /usr/local/etc/xray/config.json создаётся
-    в generate_xray_config_chain_entry_multi()/generate_xray_config()
-    лишь как СИМЛИНК на /etc/xray/config.json — для обратной совместимости.
-
-    Раньше эта функция проверяла /usr/local/etc/xray/config.json первым.
-    Поскольку симлинк "существует", он совпадал — и _save_xray_config()
-    писал именно туда через tmp.replace(p), что атомарно ПОДМЕНЯЕТ сам
-    симлинк обычным файлом (поведение os.rename для символьных ссылок).
-    В результате патч уходил в "осиротевшую" копию конфига, а реальный
-    /etc/xray/config.json, который читает запущенный Xray, не менялся
-    вообще — Hysteria2-транспорт молча не применялся к живому процессу.
-
-    Теперь проверяем /etc/xray/config.json (реальный, используемый Xray)
-    первым; /usr/local/etc/xray/config.json — только как fallback для
-    нестандартных инсталляций, где основной путь отличается.
+    Проверяем /etc/xray/config.json первым — это канонический путь,
+    который используется в ExecStart systemd unit.
+    /usr/local/etc/xray/config.json создаётся как symlink для совместимости;
+    write через tmp.replace() ломает symlink — поэтому он идёт вторым.
     """
     for p in (_XRAY_CONFIG_ALT, _XRAY_CONFIG):
         if p.exists():
@@ -92,21 +84,13 @@ def _load_xray_config() -> Optional[dict]:
 
 
 def _save_xray_config(cfg: dict) -> bool:
-    """
-    BUGFIX: если найденный путь — символическая ссылка (например,
-    /usr/local/etc/xray/config.json -> /etc/xray/config.json), пишем
-    в файл, на который она указывает (p.resolve()), а не заменяем
-    саму ссылку обычным файлом. Иначе при повторном запуске
-    /usr/local/etc/xray/config.json и /etc/xray/config.json молча
-    расходятся, и неясно, какой из них реально использует Xray.
-    """
+    """Атомарная запись. Если путь — symlink, пишем в target, не в symlink."""
     p = _find_xray_config()
     if not p:
         p = _XRAY_CONFIG_ALT
     target = p.resolve() if p.is_symlink() else p
     try:
         target.parent.mkdir(parents=True, exist_ok=True)
-        # Атомарная запись через tmp
         tmp = target.with_suffix(".tmp")
         tmp.write_text(json.dumps(cfg, indent=2, ensure_ascii=False))
         tmp.replace(target)
@@ -126,125 +110,189 @@ def _xray_restart() -> bool:
     return False
 
 
-# ── Outbound patch ────────────────────────────────────────────────────────────
-def _build_h2_outbound(
+# ── Hysteria2 native client ───────────────────────────────────────────────────
+
+def _write_h2_client_config(
     exit_ip: str,
     exit_port: int,
     auth_password: str,
-    tag: str = "proxy",
     cert_sha256: str = "",
-    sni: Optional[str] = None,
-) -> dict:
+    sni: str = "",
+) -> bool:
     """
-    Строит Xray outbound для Hysteria2.
-
-    Схема строго по официальной документации XTLS/Xray-core и подтверждённым
-    рабочим конфигам из issue-трекера (issues #5619, #5911, #5921):
-
-    1. protocol: "hysteria" (не "hysteria2"!) + settings.version: 2
-    2. streamSettings.network: "hysteria"
-    3. streamSettings.security: "tls" + tlsSettings.serverName
-       - pinnedPeerCertSha256 для самоподписанных сертификатов
-       - alpn НЕ указываем — Xray/QUIC-стек выставляет его сам (h3)
-    4. streamSettings.hysteriaSettings.version: 2 (обязательно)
-    5. streamSettings.hysteriaSettings.auth: пароль
-    6. streamSettings.hysteriaSettings.up/down: ОБЯЗАТЕЛЬНЫ для хэндшейка
-       с официальным Hysteria2-сервером (apernet/hysteria) — без них
-       сервер не завершает QUIC-хэндшейк и клиент получает timeout.
-    7. mux НЕ используется — несовместим с QUIC (Hysteria2 сам мультиплексирует
-       потоки поверх одного QUIC-соединения).
+    Генерирует /etc/hysteria/client.yaml для нативного hysteria2-клиента.
+    Клиент поднимает SOCKS5 на 127.0.0.1:10809, через который Xray
+    направляет исходящий трафик.
     """
     ipv6 = _is_ipv6(exit_ip)
-    server_addr = _bracket(exit_ip) if ipv6 else exit_ip
+    server_addr = f"[{exit_ip}]:{exit_port}" if ipv6 else f"{exit_ip}:{exit_port}"
 
-    tls_settings: dict = {
-        "serverName": sni or exit_ip,
-    }
+    # TLS: если есть SHA256-пин — используем его (insecure: false).
+    # pinSHA256 в нативном клиенте работает без проблем с CA-сертификатами,
+    # в отличие от Xray-core 26.x pinnedPeerCertSha256.
     if cert_sha256:
-        tls_settings["pinnedPeerCertSha256"] = cert_sha256
+        # Нативный клиент ожидает формат без двоеточий, строчными буквами
+        sha = cert_sha256.replace(":", "").lower()
+        tls_block = f"""tls:
+  insecure: false
+  pinSHA256: {sha}
+"""
     else:
-        warn("Нет сохранённого SHA256-отпечатка сертификата exit-ноды — "
-             "TLS-валидация провалится. Переустановите H2 на exit-ноде "
-             "(меню 7 → 1/2), чтобы отпечаток сохранился в state.json.")
+        warn("Нет SHA256-отпечатка сертификата exit-ноды — используем insecure: true")
+        tls_block = """tls:
+  insecure: true
+"""
 
+    server_name_line = f"  serverName: {sni}\n" if sni else ""
+    if sni and cert_sha256:
+        tls_block = f"""tls:
+  insecure: false
+  serverName: {sni}
+  pinSHA256: {cert_sha256.replace(':', '').lower()}
+"""
+
+    config_yaml = f"""# Hysteria2 client config — generated by VLESS Ultimate Installer
+server: {server_addr}
+
+auth: {auth_password}
+
+{tls_block}
+socks5:
+  listen: {_H2_CLIENT_SOCKS_HOST}:{_H2_CLIENT_SOCKS_PORT}
+
+quic:
+  initStreamReceiveWindow: 8388608
+  maxStreamReceiveWindow: 8388608
+  initConnReceiveWindow: 20971520
+  maxConnReceiveWindow: 20971520
+"""
+    try:
+        _H2_CLIENT_CONFIG.parent.mkdir(parents=True, exist_ok=True)
+        _H2_CLIENT_CONFIG.write_text(config_yaml)
+        info(f"Hysteria2 client config → {_H2_CLIENT_CONFIG}")
+        return True
+    except Exception as e:
+        error(f"Не удалось записать {_H2_CLIENT_CONFIG}: {e}")
+        return False
+
+
+def _ensure_hysteria_client_service() -> bool:
+    """
+    Создаёт и включает systemd-сервис hysteria-client.service.
+    Использует тот же бинарь /usr/local/bin/hysteria, что и сервер,
+    но в режиме client с отдельным конфигом client.yaml.
+    """
+    if not H2_BINARY.exists():
+        error(f"Hysteria2 бинарь не найден: {H2_BINARY}. "
+              "Сначала установите Hysteria2 на exit-ноду через меню 7.")
+        return False
+
+    unit = f"""[Unit]
+Description=Hysteria2 Client (VLESS Ultimate Installer)
+After=network.target
+Wants=network.target
+
+[Service]
+Type=simple
+ExecStart={H2_BINARY} client --config {_H2_CLIENT_CONFIG}
+Restart=on-failure
+RestartSec=5s
+LimitNOFILE=1048576
+
+[Install]
+WantedBy=multi-user.target
+"""
+    unit_path = Path(f"/etc/systemd/system/{_H2_CLIENT_SERVICE}.service")
+    try:
+        unit_path.write_text(unit)
+        _run(["systemctl", "daemon-reload"], quiet=True)
+        _run(["systemctl", "enable", _H2_CLIENT_SERVICE], quiet=True)
+        return True
+    except Exception as e:
+        error(f"Не удалось создать {_H2_CLIENT_SERVICE}.service: {e}")
+        return False
+
+
+def _start_hysteria_client() -> bool:
+    r = _run(["systemctl", "restart", _H2_CLIENT_SERVICE], quiet=True)
+    if r.returncode != 0:
+        error(f"Не удалось запустить {_H2_CLIENT_SERVICE}")
+        _run(["journalctl", "-u", _H2_CLIENT_SERVICE, "-n", "20",
+              "--no-pager"], quiet=False)
+        return False
+    time.sleep(2)
+    r2 = _run(["systemctl", "is-active", "--quiet", _H2_CLIENT_SERVICE],
+               quiet=True)
+    if r2.returncode != 0:
+        error(f"{_H2_CLIENT_SERVICE} упал после запуска")
+        _run(["journalctl", "-u", _H2_CLIENT_SERVICE, "-n", "20",
+              "--no-pager"], quiet=False)
+        return False
+    success(f"hysteria-client запущен → SOCKS5 {_H2_CLIENT_SOCKS_HOST}:{_H2_CLIENT_SOCKS_PORT}")
+    return True
+
+
+def _stop_hysteria_client() -> None:
+    _run(["systemctl", "stop", _H2_CLIENT_SERVICE], quiet=True)
+    _run(["systemctl", "disable", _H2_CLIENT_SERVICE], quiet=True)
+
+
+# ── Xray outbound patch ───────────────────────────────────────────────────────
+
+def _build_socks_outbound(
+    host: str = _H2_CLIENT_SOCKS_HOST,
+    port: int = _H2_CLIENT_SOCKS_PORT,
+    tag: str = "proxy",
+) -> dict:
+    """
+    SOCKS5 outbound, указывающий на локальный Hysteria2-клиент.
+    Xray не знает, что за ним стоит — для него это обычный SOCKS5-прокси.
+    """
     return {
         "tag": tag,
-        "protocol": "hysteria",
+        "protocol": "socks",
         "settings": {
-            "version": 2,
-            "address": server_addr,
-            "port": exit_port,
+            "servers": [{
+                "address": host,
+                "port": port,
+            }]
         },
-        "streamSettings": {
-            "network": "hysteria",
-            "security": "tls",
-            "tlsSettings": tls_settings,
-            "hysteriaSettings": {
-                "version": 2,
-                "auth": auth_password,
-                # up/down обязательны для хэндшейка с официальным Hysteria2-сервером.
-                # Без них apernet/hysteria не завершает QUIC Initial и клиент
-                # получает "timeout: no recent network activity" несмотря на то,
-                # что пакеты физически доходят до сервера (видно в tcpdump/iptables).
-                "up": "100mbps",
-                "down": "300mbps",
-                "udpIdleTimeout": 60,
-            },
-        },
-        # mux намеренно не добавляется — Hysteria2/QUIC сам мультиплексирует потоки.
     }
 
 
 def _find_proxy_outbound_idx(cfg: dict, tag: str = "proxy") -> int:
-    """Возвращает индекс outbound с тегом 'proxy' или -1."""
     for i, ob in enumerate(cfg.get("outbounds", [])):
         if ob.get("tag") == tag:
             return i
     return -1
 
 
-# ── BUGFIX: routing catch-all не указывал на H2-outbound ──────────────────────
-# Проблема: generate_xray_config() / generate_xray_config_chain_entry_multi()
-# (ветка H2_EXIT_ENABLED без VLESS exit-нод) ставят catch-all routing-правило
-# {"network": "tcp,udp", "outboundTag": "direct"} или "chain-exit".
-# h2_transport_apply() добавлял outbound с тегом "proxy", но НЕ трогал routing —
-# в итоге весь трафик продолжал уходить через "direct"/"chain-exit" (т.е. с
-# Entry-ноды напрямую или по старому транспорту), Hysteria2-outbound был
-# "осиротевшим" и никогда не использовался. Снаружи это выглядело так, будто
-# Hysteria2 "включился" (success-сообщение), но IP-чекеры показывали Entry IP,
-# а не Exit IP — трафик реально никогда не покидал Entry-ноду через H2.
 def _find_catchall_rule(cfg: dict) -> Optional[dict]:
-    """
-    Находит routing-правило catch-all (network: tcp,udp), которое НЕ относится
-    к loopback (127.0.0.1/::1) и НЕ является BLOCK-правилом. Это правило
-    определяет, куда уходит "весь остальной" трафик клиентов.
-    """
-    rules = cfg.get("routing", {}).get("rules", [])
-    for rule in rules:
+    """Находит catch-all routing-правило (network: tcp,udp, не BLOCK)."""
+    for rule in cfg.get("routing", {}).get("rules", []):
         if rule.get("type") != "field":
             continue
         net = rule.get("network", "")
-        if "tcp" in net and "udp" in net and not rule.get("ip") and not rule.get("protocol"):
-            if rule.get("outboundTag") != "BLOCK":
-                return rule
+        if ("tcp" in net and "udp" in net
+                and not rule.get("ip")
+                and not rule.get("protocol")
+                and rule.get("outboundTag") != "BLOCK"):
+            return rule
     return None
 
 
 def _patch_routing_to_proxy(cfg: dict, tag: str = "proxy") -> tuple[bool, str]:
-    """
-    Переключает catch-all routing-правило на outboundTag=tag (по умолчанию "proxy"),
-    запоминая предыдущий тег, чтобы h2_transport_remove() мог откатить.
-    Возвращает (изменено?, предыдущий_тег).
-    """
     rule = _find_catchall_rule(cfg)
     if rule is None:
         return False, ""
-    prev_tag = rule.get("outboundTag", "")
-    if prev_tag == tag:
-        return False, prev_tag
+    prev = rule.get("outboundTag", "")
+    if prev == tag:
+        return False, prev
     rule["outboundTag"] = tag
-    return True, prev_tag
+    return True, prev
 
+
+# ── Public API ────────────────────────────────────────────────────────────────
 
 def h2_transport_apply(
     exit_ip: str = "",
@@ -253,12 +301,15 @@ def h2_transport_apply(
     insecure: bool = True,
 ) -> bool:
     """
-    Применяет Hysteria2 как транспорт на Entry-ноде.
-    Патчит outbound в Xray конфиге без изменения inbound/routing/генерации ссылок.
+    Применяет Hysteria2 как транспорт на Entry-ноде:
+      1. Записывает /etc/hysteria/client.yaml
+      2. Создаёт и запускает systemd-сервис hysteria-client
+      3. Патчит Xray outbound → SOCKS5 → 127.0.0.1:10809
+      4. Патчит catch-all routing-правило на тег proxy
+      5. Перезапускает Xray
     """
     h2 = _ensure_h2_state()
 
-    # Если параметры не переданы — берём из первой активной exit_node
     if not exit_ip:
         nodes = [n for n in h2.get("exit_nodes", []) if n.get("status") == "active"]
         if not nodes:
@@ -273,71 +324,71 @@ def h2_transport_apply(
         error("Не задан пароль аутентификации H2")
         return False
 
-    # Находим сохранённый SHA256-отпечаток сертификата этой exit-ноды —
-    # нужен для pinnedPeerCertSha256 (allowInsecure в Xray-core больше нет).
     cert_sha256 = ""
     for n in h2.get("exit_nodes", []):
         if n.get("ip") == exit_ip:
             cert_sha256 = n.get("cert_sha256", "")
             break
 
+    # 1. Конфиг нативного клиента
+    if not _write_h2_client_config(exit_ip, exit_port, auth_password, cert_sha256):
+        return False
+
+    # 2. Systemd-сервис
+    if not _ensure_hysteria_client_service():
+        return False
+
+    # 3. Запуск клиента
+    if not _start_hysteria_client():
+        return False
+
+    # 4. Патч Xray config
     cfg = _load_xray_config()
     if cfg is None:
         error("Xray config.json не найден")
         return False
 
-    new_ob = _build_h2_outbound(exit_ip, exit_port, auth_password,
-                                 cert_sha256=cert_sha256)
-
+    new_ob = _build_socks_outbound()
     idx = _find_proxy_outbound_idx(cfg)
     if idx >= 0:
-        # Сохраняем старый outbound в state для возможного rollback
-        old_ob = cfg["outbounds"][idx]
-        h2["_prev_outbound"] = old_ob
+        h2["_prev_outbound"] = cfg["outbounds"][idx]
         cfg["outbounds"][idx] = new_ob
-        info(f"Заменяю outbound[{idx}] (тег=proxy) на Hysteria2")
+        info("Заменяю outbound[proxy] → SOCKS5 (Hysteria2 native client)")
     else:
         cfg.setdefault("outbounds", []).insert(0, new_ob)
-        info("Добавляю новый Hysteria2 outbound")
+        info("Добавляю SOCKS5 outbound → Hysteria2 native client")
 
-    # BUGFIX: без этого catch-all routing-правило продолжало указывать на
-    # "direct"/"chain-exit", и новый outbound "proxy" никогда не использовался —
-    # весь трафик уходил с Entry-ноды напрямую, минуя Exit. Переключаем
-    # catch-all правило на наш тег и запоминаем предыдущий для отката.
     changed, prev_tag = _patch_routing_to_proxy(cfg, tag="proxy")
     if changed:
         h2["_prev_routing_tag"] = prev_tag
-        info(f"Routing catch-all переключён: {prev_tag} → proxy")
-    elif prev_tag:
-        info("Routing catch-all уже указывает на proxy — пропускаю")
-    else:
-        warn("Не найдено catch-all routing-правило (network: tcp,udp) — "
-             "проверьте config.json вручную, Hysteria2-outbound может быть не задействован!")
+        info(f"Routing catch-all: {prev_tag} → proxy")
+    elif not prev_tag:
+        warn("Catch-all routing-правило не найдено — проверьте config.json")
 
     if not _save_xray_config(cfg):
         return False
 
     _xray_restart()
 
-    h2["transport_only"] = False
     h2["active_transport"] = "hysteria2"
     _save_h2_state(h2)
 
-    success(f"Транспорт Hysteria2 активирован → {exit_ip}:{exit_port}")
-    _tg_h2_event("h2_switch", f"Транспорт → H2 ({exit_ip}:{exit_port})")
-    log_to_file("INFO", f"H2 transport applied: {exit_ip}:{exit_port}")
+    success(f"Hysteria2 транспорт активирован: "
+            f"Xray → SOCKS5:10809 → hysteria-client → {exit_ip}:{exit_port}")
+    _tg_h2_event("h2_switch", f"Транспорт → H2 native ({exit_ip}:{exit_port})")
+    log_to_file("INFO", f"H2 native transport applied: {exit_ip}:{exit_port}")
     return True
 
 
 def h2_transport_remove() -> bool:
-    """
-    Откатывает Hysteria2 outbound. Если был сохранён prev_outbound — восстанавливает,
-    иначе удаляет H2 outbound (Xray вернётся к следующему outbound в списке).
-    """
+    """Откатывает H2-транспорт: останавливает hysteria-client, восстанавливает Xray outbound."""
     h2 = _load_h2_state()
     cfg = _load_xray_config()
     if cfg is None:
         return False
+
+    # Останавливаем нативный клиент
+    _stop_hysteria_client()
 
     prev_ob = h2.pop("_prev_outbound", None)
     prev_routing_tag = h2.pop("_prev_routing_tag", None)
@@ -349,11 +400,8 @@ def h2_transport_remove() -> bool:
             info("Восстановлен предыдущий outbound (AWG/VLESS)")
         else:
             cfg["outbounds"].pop(idx)
-            info("Hysteria2 outbound удалён")
+            info("SOCKS5/H2 outbound удалён")
 
-    # BUGFIX: откатываем catch-all routing-правило обратно на тег,
-    # который был до включения H2 (обычно "direct" или "chain-exit"),
-    # иначе после удаления outbound "proxy" весь трафик уйдёт в blackhole/EOF.
     if prev_routing_tag:
         rule = _find_catchall_rule(cfg)
         if rule is not None:
@@ -366,36 +414,40 @@ def h2_transport_remove() -> bool:
     _xray_restart()
     h2["active_transport"] = "awg"
     _save_h2_state(h2)
-    success("Транспорт H2 отключён")
+    success("Транспорт H2 отключён, hysteria-client остановлен")
     _tg_h2_event("h2_switch", "Транспорт → AWG/VLESS")
     return True
 
 
 def h2_transport_status() -> dict:
-    """Возвращает информацию о текущем активном транспорте."""
     h2 = _load_h2_state()
     cfg = _load_xray_config()
     active = "unknown"
     exit_ip = ""
     exit_port = 0
 
-    if cfg:
-        idx = _find_proxy_outbound_idx(cfg)
-        if idx >= 0:
-            ob = cfg["outbounds"][idx]
-            proto = ob.get("protocol", "")
-            # ВАЖНО: правильное имя протокола в Xray-core — "hysteria"
-            # (не "hysteria2"), см. _build_h2_outbound(). Раньше эта проверка
-            # сверялась со старым (ошибочным) именем и никогда не срабатывала.
-            if proto == "hysteria":
-                active = "hysteria2"
-                settings = ob.get("settings", {})
-                exit_ip   = settings.get("address", "")
-                exit_port = settings.get("port", 0)
-            elif proto in ("vless", "vmess", "freedom"):
-                active = proto
-            else:
-                active = proto
+    # Проверяем, запущен ли hysteria-client
+    r = _run(["systemctl", "is-active", "--quiet", _H2_CLIENT_SERVICE], quiet=True)
+    if r.returncode == 0:
+        active = "hysteria2"
+        # Читаем exit-параметры из client.yaml
+        if _H2_CLIENT_CONFIG.exists():
+            try:
+                for line in _H2_CLIENT_CONFIG.read_text().splitlines():
+                    if line.startswith("server:"):
+                        srv = line.split(":", 1)[1].strip()
+                        # srv может быть "ip:port" или "[ipv6]:port"
+                        if srv.startswith("["):
+                            exit_ip = srv[1:srv.index("]")]
+                            exit_port = int(srv.split("]:")[-1])
+                        else:
+                            parts = srv.rsplit(":", 1)
+                            exit_ip = parts[0]
+                            exit_port = int(parts[1]) if len(parts) > 1 else 443
+            except Exception:
+                pass
+    else:
+        active = h2.get("active_transport", "awg")
 
     return {
         "active_transport": active,
@@ -406,10 +458,7 @@ def h2_transport_status() -> dict:
 
 
 def h2_select_transport() -> None:
-    """
-    Интерактивный выбор транспорта: AWG / Hysteria2 / Оба (с весами балансировщика).
-    Вызывается из do_hysteria2_menu().
-    """
+    """Интерактивный выбор транспорта: AWG / Hysteria2."""
     while True:
         os.system("clear")
         print()
@@ -421,12 +470,13 @@ def h2_select_transport() -> None:
         col = GREEN if active == "hysteria2" else (YELLOW if active == "awg" else CYAN)
 
         _box_top("🔀  HYSTERIA2 — ВЫБОР ТРАНСПОРТА ENTRY → EXIT")
-        status_extra = f"  │  {DIM}Exit: {exit_ip}:{exit_prt}{NC}" if active == "hysteria2" and exit_ip else ""
+        status_extra = (f"  │  {DIM}Exit: {exit_ip}:{exit_prt}{NC}"
+                        if active == "hysteria2" and exit_ip else "")
         _box_row(f"  Транспорт: {col}{active}{NC}{status_extra}  │  H2 нод: {CYAN}{n_nodes}{NC}")
         _box_sep()
         _box_row()
         _box_item("1", f"AWG (AmneziaWG)         {DIM}Вернуть на AWG/VLESS транспорт{NC}")
-        _box_item("2", f"Hysteria2 (QUIC/UDP)    {DIM}Переключить outbound на H2{NC}")
+        _box_item("2", f"Hysteria2 (нативный)    {DIM}Запустить hysteria-client + SOCKS5 outbound{NC}")
         _box_item("3", f"Оба (AWG + H2)          {DIM}Балансировка по весам{NC}")
         _box_row()
         _box_item_exit("Q", "← Назад")
@@ -437,7 +487,7 @@ def h2_select_transport() -> None:
         except KeyboardInterrupt:
             break
 
-        if ch == "Q" or ch == "":
+        if ch in ("Q", ""):
             break
 
         elif ch == "1":
@@ -466,23 +516,3 @@ def h2_select_transport() -> None:
         else:
             warn("Неверный выбор")
             time.sleep(0.8)
-
-
-"""
-ПРИМЕР ВЫЗОВА из _core.py:
-    from vless_installer.modules.hysteria2_transport import (
-        h2_transport_apply, h2_transport_remove, h2_select_transport,
-    )
-
-    # Включить H2 транспорт:
-    h2_transport_apply()          # берёт ноду из state.json
-
-    # Явно:
-    h2_transport_apply(exit_ip="1.2.3.4", exit_port=443, auth_password="secret")
-
-    # Откатить:
-    h2_transport_remove()
-
-    # Интерактивный выбор:
-    h2_select_transport()
-"""
