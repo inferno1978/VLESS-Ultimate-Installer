@@ -118,6 +118,15 @@ def _get_fallback_module():
     except ImportError:
         return None
 
+# Веб-панель управления: telemt_panel.py
+def _get_panel_module():
+    """Lazy-import telemt_panel — изолирует ошибки импорта."""
+    try:
+        from vless_installer.modules import telemt_panel as _panel_mod
+        return _panel_mod
+    except ImportError:
+        return None
+
 # MSS-фрагментация против TSPU JA4: telemt_mss_selector.py
 def _get_mss_module():
     """Lazy-import telemt_mss_selector — изолирует ошибки импорта."""
@@ -556,6 +565,46 @@ def _write_config(port, ipv4, ipv6, tls_domain, users, use_middle_proxy,
             except Exception as _e:
                 _warn(f"Не удалось записать [middle_proxy]: {_e}")
 
+
+def ensure_api_enabled(token: str, host: str = "127.0.0.1", port: int = 9091) -> tuple:
+    """
+    Включает/обновляет секцию [api] в telemt.toml — единая точка правды для
+    файла конфига Telemt (используется telemt_panel.py, чтобы не плодить
+    вторую параллельную логику записи этого файла).
+
+    Идемпотентно: если секция уже есть — просто обновляет listen/token,
+    ничего больше в файле не трогает (порядок остальных секций сохраняется).
+    Возвращает (ok: bool, message: str).
+    """
+    if not CONFIG_FILE.exists():
+        return False, "Telemt не установлен — нечего включать."
+
+    text = CONFIG_FILE.read_text()
+    new_section = (
+        "[api]\n"
+        f'listen = "{host}:{port}"\n'
+        f'auth_header = "{token}"\n'
+    )
+
+    if "[api]" in text:
+        # Заменяем существующую секцию целиком (до следующего заголовка [...]
+        # или до конца файла), не трогая ничего вокруг.
+        pattern = re.compile(r"\[api\]\n(?:(?!\n\[)[^\n]*\n?)*", re.MULTILINE)
+        if not pattern.search(text):
+            # На случай нестандартного форматирования — не рискуем ломать файл.
+            return False, "Секция [api] найдена, но не удалось безопасно её заменить."
+        text = pattern.sub(new_section, text, count=1)
+        action = "обновлена"
+    else:
+        sep = "" if text.endswith("\n\n") else ("\n" if text.endswith("\n") else "\n\n")
+        text = text + sep + new_section
+        action = "добавлена"
+
+    CONFIG_FILE.write_text(text)
+    r = _run(["systemctl", "restart", SERVICE_NAME])
+    if r.returncode != 0:
+        return False, f"Секция [api] {action}, но перезапуск Telemt не удался."
+    return True, f"Секция [api] {action}, Telemt перезапущен ({host}:{port})."
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -2007,6 +2056,7 @@ def mtproto_menu() -> None:
         _box_item("I", "🍎  iOS-фикс (MSS + отдельный порт)")
         _box_item("N", "🌐  Обновить подсети Telegram (RIPE NCC)")
         _box_item("W", "🌀  Telegram через WARP (для RU-серверов)")
+        _box_item("P", "🖥️   Telemt Panel (веб-интерфейс)")
         _box_item("8", f"{RED}🗑️   Полное удаление{NC}")
         _box_sep()
         _box_item("Q", "← Назад в главное меню VLESS")
@@ -2283,6 +2333,19 @@ def mtproto_menu() -> None:
                 pass
             except Exception as _we:
                 _err(f"Ошибка меню Telegram→WARP: {_we}"); _pause()
+
+        elif ch == "p":
+            # ── Telemt Panel (веб-интерфейс) ────────────────────────────────
+            _panel_mod = _get_panel_module()
+            if _panel_mod is None:
+                _err("Модуль telemt_panel не найден (файл modules/telemt_panel.py)."); _pause()
+                continue
+            try:
+                _panel_mod.telemt_panel_menu()
+            except _Cancelled:
+                pass
+            except Exception as _pe:
+                _err(f"Ошибка меню Telemt Panel: {_pe}"); _pause()
 
         elif ch in ("q", ""):
             break
