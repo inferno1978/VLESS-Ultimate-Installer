@@ -234,15 +234,18 @@ def _telemt_is_installed(mp) -> bool:
 #  СКАЧИВАНИЕ / УСТАНОВКА БИНАРНИКА ПАНЕЛИ
 # ══════════════════════════════════════════════════════════════════════════════
 def _get_latest_release() -> tuple:
-    """Возвращает (tag, url) под текущую архитектуру или ('', '') при ошибке."""
+    """Возвращает (tag, url) под текущую архитектуру/libc или ('', '') при ошибке."""
     try:
         req = urllib.request.Request(GITHUB_API, headers={"User-Agent": "VLESS-Ultimate-Installer"})
         with urllib.request.urlopen(req, timeout=10) as r:
             data = json.loads(r.read())
         tag  = data.get("tag_name", "").lstrip("v")
         arch = "aarch64" if platform.machine().lower() in ("aarch64", "arm64") else "x86_64"
+        # Ассеты релиза — tar.gz, суффикс gnu/musl (см. release.yml проекта).
+        # Определяем libc так же, как это уже делает mtproto.py для Telemt.
+        libc = "musl" if "musl" in _run(["ldd", "--version"], capture=True).stdout.lower() else "gnu"
         url  = (f"https://github.com/amirotin/telemt_panel/releases/latest/download/"
-                f"telemt-panel-{arch}-linux")
+                f"telemt-panel-{arch}-linux-{libc}.tar.gz")
         return tag, url
     except Exception as e:
         _err(f"Не удалось получить релиз: {e}")
@@ -251,13 +254,17 @@ def _get_latest_release() -> tuple:
 def _install_binary(url: str) -> bool:
     _info("Загрузка telemt-panel...")
     tmp = Path(tempfile.mkdtemp())
-    dst = tmp / "telemt-panel"
+    archive = tmp / "telemt-panel.tar.gz"
     try:
-        urllib.request.urlretrieve(url, dst)
-        if dst.stat().st_size < 1_000_000:
-            _err("Скачанный файл подозрительно маленький — похоже на ошибку 404/редирект.")
+        urllib.request.urlretrieve(url, archive)
+        import tarfile
+        with tarfile.open(archive) as tf:
+            tf.extractall(tmp)
+        found = [p for p in tmp.rglob("telemt-panel-*-linux") if p.is_file()]
+        if not found:
+            _err("Бинарник не найден в архиве")
             return False
-        shutil.copy2(str(dst), str(BIN_PATH))
+        shutil.copy2(str(found[0]), str(BIN_PATH))
         BIN_PATH.chmod(0o755)
         _ok(f"Установлено: {BIN_PATH}")
         return True
