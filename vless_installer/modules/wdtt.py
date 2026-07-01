@@ -562,8 +562,28 @@ def _build_wdtt_server() -> bool:
             print(f"  {RED}✗{NC}  Бинарник не создан после компиляции.")
             return False
 
+        # Перед заменой бинарника останавливаем сервис если он запущен.
+        # shutil.copy2() на работающий процесс вызывает [Errno 26] Text file
+        # busy — Linux запрещает перезаписывать исполняемый файл напрямую.
+        # Правильный способ: удалить старый файл (unlink), затем скопировать
+        # новый — или остановить сервис, скопировать, потом запустить снова.
+        _svc_was_active = False
+        if _SERVICE_FILE.exists():
+            _chk = _run(["systemctl", "is-active", "--quiet", "wdtt"],
+                        capture=True, check=False)
+            _svc_was_active = (_chk.returncode == 0)
+            if _svc_was_active:
+                _run(["systemctl", "stop", "wdtt"], capture=True, check=False)
+
+        # Атомарная замена: unlink + copy вместо перезаписи
+        if _BIN_PATH.exists():
+            _BIN_PATH.unlink()
         shutil.copy2(str(built), str(_BIN_PATH))
         _BIN_PATH.chmod(0o755)
+
+        if _svc_was_active:
+            _run(["systemctl", "start", "wdtt"], capture=True, check=False)
+
         print(f"  {GREEN}✓{NC}  wdtt-server установлен: {_BIN_PATH}")
         return True
 
