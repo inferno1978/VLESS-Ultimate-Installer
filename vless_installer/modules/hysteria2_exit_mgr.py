@@ -216,11 +216,17 @@ def _install_systemd_unit() -> None:
 
 
 # ── Сертификаты ───────────────────────────────────────────────────────────────
-def _ensure_h2_cert(domain: str = "") -> tuple[str, str]:
+def _ensure_h2_cert(domain: str = "", ip: str = "") -> tuple[str, str]:
     """
     Возвращает (cert_path, key_path).
     Если certbot есть и domain задан — получает TLS-сертификат.
-    Иначе — генерирует самоподписанный.
+    Иначе — генерирует самоподписанный leaf-сертификат с корректными SAN.
+
+    ВАЖНО: нативный hysteria2-клиент (в отличие от Xray-core) проверяет
+    SubjectAltName при TLS-верификации. Если сертификат не содержит SAN с
+    IP или DNS-именем сервера — клиент падает с ошибкой
+    "x509: cannot validate certificate for X because it doesn't contain any IP SANs".
+    Поэтому обязательно передавайте ip= (для IP-адресов) или domain=.
     """
     if H2_CERT_FILE.exists() and H2_KEY_FILE.exists():
         return str(H2_CERT_FILE), str(H2_KEY_FILE)
@@ -241,17 +247,18 @@ def _ensure_h2_cert(domain: str = "") -> tuple[str, str]:
             return str(H2_CERT_FILE), str(H2_KEY_FILE)
         warn("certbot не смог получить сертификат, генерирую самоподписанный")
 
-    info("Генерирую самоподписанный TLS-сертификат (leaf, CA:FALSE)...")
-    # BUGFIX: openssl req -x509 без дополнительных расширений создаёт
-    # сертификат с Basic Constraints: CA=TRUE. Xray-core 26.x при
-    # использовании pinnedPeerCertSha256 падает с ошибкой TLS-валидации,
-    # не доходя до проверки SHA256-пина, если сервер возвращает CA-сертификат
-    # как конечный (issue XTLS/Xray-core #5904, #5655). Пакеты физически
-    # доходят до exit-ноды (видно в tcpdump), но Xray молча рвёт хендшейк,
-    # сервер не отвечает — клиент получает EOF/timeout.
-    # Решение: явно задаём basicConstraints=CA:FALSE + keyUsage + EKU,
-    # чтобы получить настоящий leaf-сертификат, который Xray принимает.
-    cn = domain or "hysteria2.local"
+    # Строим CN и SAN
+    cn = domain or ip or "hysteria2.local"
+    if ip and domain:
+        san = f"IP:{ip},DNS:{domain}"
+    elif ip:
+        san = f"IP:{ip}"
+    elif domain:
+        san = f"DNS:{domain}"
+    else:
+        san = "DNS:hysteria2.local"
+
+    info(f"Генерирую самоподписанный TLS-сертификат (leaf, CA:FALSE, SAN={san})...")
     r = _run([
         "openssl", "req", "-x509", "-newkey", "rsa:4096",
         "-keyout", str(H2_KEY_FILE),
@@ -261,16 +268,17 @@ def _ensure_h2_cert(domain: str = "") -> tuple[str, str]:
         "-addext", "basicConstraints=CA:FALSE",
         "-addext", "keyUsage=digitalSignature,keyEncipherment",
         "-addext", "extendedKeyUsage=serverAuth",
+        "-addext", f"subjectAltName={san}",
     ], quiet=True, check=False)
     if r.returncode != 0:
-        # Фоллбэк для старых OpenSSL < 1.1.1 (без поддержки -addext):
-        # генерируем через внешний extfile
-        warn("openssl не поддерживает -addext, генерирую leaf через extfile...")
+        # Фоллбэк для OpenSSL < 1.1.1 (без поддержки -addext)
+        warn("openssl не поддерживает -addext, генерирую через extfile...")
         import tempfile
         with tempfile.NamedTemporaryFile(mode="w", suffix=".ext", delete=False) as f:
             f.write("basicConstraints=CA:FALSE\n"
                     "keyUsage=digitalSignature,keyEncipherment\n"
-                    "extendedKeyUsage=serverAuth\n")
+                    "extendedKeyUsage=serverAuth\n"
+                    f"subjectAltName={san}\n")
             ext_path = f.name
         _run([
             "openssl", "req", "-x509", "-newkey", "rsa:4096",
@@ -284,15 +292,15 @@ def _ensure_h2_cert(domain: str = "") -> tuple[str, str]:
         Path(ext_path).unlink(missing_ok=True)
     H2_CERT_FILE.chmod(0o644)
     H2_KEY_FILE.chmod(0o600)
-    # Проверяем, что в итоге получили leaf, а не CA
     _check = _run(["openssl", "x509", "-in", str(H2_CERT_FILE),
                    "-noout", "-text"], capture=True, quiet=True, check=False)
     if "CA:TRUE" in _check.stdout:
-        warn("Сгенерированный сертификат имеет CA:TRUE — "
-             "pinnedPeerCertSha256 в Xray-core 26.x может не работать "
-             "(обновите OpenSSL до 1.1.1+ на exit-ноде)")
+        warn("Сертификат имеет CA:TRUE — обновите OpenSSL до 1.1.1+")
+    elif "IP Address" not in _check.stdout and "DNS:" not in _check.stdout:
+        warn("Сертификат не содержит SAN — нативный hysteria2-клиент может "
+             "отклонить соединение (передайте ip= или domain= в _ensure_h2_cert)")
     else:
-        success(f"Leaf-сертификат (CA:FALSE) → {H2_CERT_FILE}")
+        success(f"Leaf-сертификат (CA:FALSE, SAN={san}) → {H2_CERT_FILE}")
     return str(H2_CERT_FILE), str(H2_KEY_FILE)
 
 
@@ -322,7 +330,14 @@ def h2_exit_install(
     if not listen_host:
         listen_host = "::" if ipv6_avail else "0.0.0.0"
 
-    cert_path, key_path = _ensure_h2_cert(domain)
+    # Определяем локальный IP заранее — нужен для SAN в сертификате.
+    # Нативный hysteria2-клиент требует subjectAltName=IP:X в сертификате,
+    # иначе падает с "no IP SANs" даже при наличии pinSHA256.
+    _ip_r = _run(["hostname", "-I"], capture=True, check=False)
+    local_ip = _ip_r.stdout.strip().split()[0] \
+        if _ip_r.returncode == 0 and _ip_r.stdout.strip() else ""
+
+    cert_path, key_path = _ensure_h2_cert(domain=domain, ip=local_ip)
 
     H2_CONFIG_DIR.mkdir(parents=True, exist_ok=True)
     cfg_yaml = _generate_h2_config(
@@ -518,16 +533,19 @@ def h2_exit_remote_install(
         f"{{ echo 'ERROR: hysteria binary is not ELF (wrong arch or GitHub unreachable)'; "
         f"rm -f /tmp/hysteria.bin; exit 1; }}",
         "mkdir -p /etc/hysteria /etc/xray",
-        # BUGFIX: добавлены -addext для генерации leaf-сертификата (CA:FALSE).
-        # Без этого openssl создаёт CA-сертификат, который Xray-core 26.x
-        # отвергает при использовании pinnedPeerCertSha256 (issue #5904).
+        # Генерируем leaf-сертификат (CA:FALSE) с subjectAltName=IP:{host}.
+        # CA:FALSE обязателен для Xray-core 26.x (issue #5904).
+        # subjectAltName=IP:{host} обязателен для нативного hysteria2-клиента:
+        # без него клиент падает с "no IP SANs" даже при наличии pinSHA256.
         f"openssl req -x509 -newkey rsa:4096 -keyout /etc/xray/hysteria.key "
-        f"-out /etc/xray/hysteria.crt -days 3650 -nodes -subj '/CN=hysteria2.local' "
+        f"-out /etc/xray/hysteria.crt -days 3650 -nodes -subj '/CN={host}' "
         f"-addext 'basicConstraints=CA:FALSE' "
         f"-addext 'keyUsage=digitalSignature,keyEncipherment' "
-        f"-addext 'extendedKeyUsage=serverAuth' 2>/dev/null || "
+        f"-addext 'extendedKeyUsage=serverAuth' "
+        f"-addext 'subjectAltName=IP:{host}' 2>/dev/null || "
+        # Фоллбэк для OpenSSL < 1.1.1 (без -addext) — без SAN, с предупреждением
         f"openssl req -x509 -newkey rsa:4096 -keyout /etc/xray/hysteria.key "
-        f"-out /etc/xray/hysteria.crt -days 3650 -nodes -subj '/CN=hysteria2.local' "
+        f"-out /etc/xray/hysteria.crt -days 3650 -nodes -subj '/CN={host}' "
         f"|| echo 'ERROR: openssl не смог создать сертификат'",
         _generate_systemd_remote(),
         f"systemctl daemon-reload && systemctl enable --now {H2_SERVICE}",
