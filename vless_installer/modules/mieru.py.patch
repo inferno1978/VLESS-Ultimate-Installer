@@ -1,0 +1,74 @@
+diff --git a/vless_installer/modules/mieru.py b/vless_installer/modules/mieru.py
+index 073dbec..46cab05 100644
+--- a/vless_installer/modules/mieru.py
++++ b/vless_installer/modules/mieru.py
+@@ -335,6 +335,33 @@ def _get_download_urls(version: str) -> tuple[str, str]:
+     mieru_url = f"{base}/mieru_{version}_linux_{arch}.tar.gz"
+     return mita_url, mieru_url
+ 
++def _atomic_install_binary(src: Path, dest: Path) -> None:
++    """
++    Копирует src → dest атомарно через os.replace(), а не shutil.copy2()
++    напрямую поверх dest.
++
++    Причина: если dest сейчас исполняется работающим процессом (mita.service
++    активен во время переустановки/обновления поверх существующей установки),
++    прямая запись в файл (copy2 открывает dest на запись с truncate) падает
++    с 'Errno 26 Text file busy' — ядро Linux не даёт менять содержимое файла,
++    пока он замаплен в память запущенного процесса.
++
++    os.replace() этой проблемы не имеет: он просто переключает directory
++    entry на новый inode во временном файле рядом (та же ФС — иначе rename
++    не атомарен), а уже запущенный процесс продолжает работать со старым
++    (отсоединённым от каталога, но ещё не освобождённым) inode до своего
++    перезапуска. Именно поэтому сразу после установки бинарника сервис
++    нужно перезапустить — это уже делает вызывающий код ниже по потоку.
++    """
++    dest.parent.mkdir(parents=True, exist_ok=True)
++    tmp_dest = dest.with_name(dest.name + f".new.{os.getpid()}")
++    try:
++        shutil.copy2(str(src), str(tmp_dest))
++        tmp_dest.chmod(0o755)
++        os.replace(str(tmp_dest), str(dest))
++    finally:
++        tmp_dest.unlink(missing_ok=True)
++
+ def _install_mita_package(version: str) -> bool:
+     """
+     Устанавливает mita используя пакетный менеджер (deb/rpm) если доступен,
+@@ -357,12 +384,9 @@ def _install_mita_package(version: str) -> bool:
+                     # dpkg кладёт бинарник в /usr/bin/mita
+                     sys_bin = Path("/usr/bin/mita")
+                     if sys_bin.exists() and not _MITA_BIN.exists():
+-                        _MITA_BIN.parent.mkdir(parents=True, exist_ok=True)
+-                        shutil.copy2(str(sys_bin), str(_MITA_BIN))
+-                        _MITA_BIN.chmod(0o755)
++                        _atomic_install_binary(sys_bin, _MITA_BIN)
+                     elif sys_bin.exists():
+-                        shutil.copy2(str(sys_bin), str(_MITA_BIN))
+-                        _MITA_BIN.chmod(0o755)
++                        _atomic_install_binary(sys_bin, _MITA_BIN)
+                     print(f"  {GREEN}✓{NC}  mita {version} установлен через dpkg.")
+                     return True
+                 else:
+@@ -383,9 +407,7 @@ def _install_mita_package(version: str) -> bool:
+                 if r.returncode == 0:
+                     sys_bin = Path("/usr/bin/mita")
+                     if sys_bin.exists():
+-                        _MITA_BIN.parent.mkdir(parents=True, exist_ok=True)
+-                        shutil.copy2(str(sys_bin), str(_MITA_BIN))
+-                        _MITA_BIN.chmod(0o755)
++                        _atomic_install_binary(sys_bin, _MITA_BIN)
+                     print(f"  {GREEN}✓{NC}  mita {version} установлен через rpm.")
+                     return True
+                 else:
+@@ -426,8 +448,7 @@ def _download_binary(url: str, dest: Path, name: str) -> bool:
+                 print(f"  {RED}✗{NC}  {name} — не ELF бинарник.")
+                 return False
+ 
+-        shutil.copy2(str(bin_file), str(dest))
+-        dest.chmod(0o755)
++        _atomic_install_binary(bin_file, dest)
+         print(f"  {GREEN}✓{NC}  {name} установлен: {dest}")
+         return True
+     except Exception as e:
