@@ -2,7 +2,84 @@
 
 ---
 
-## 🧪 Постквантовый VLESS — найденные баги, диагностика, переключатель flow — 29 июня 2026
+## 🔀 Hysteria2-транспорт: полная переработка — 2 июля 2026
+
+### Контекст и причины
+
+Режим B (Entry → Exit) с транспортом Hysteria2 не работал совсем — трафик всегда уходил напрямую с Entry-ноды, игнорируя Exit. В ходе двухдневной отладки на живых серверах было выявлено несколько независимых багов, накладывавшихся друг на друга.
+
+### Найденные баги (все устранены)
+
+**1. Xray built-in `protocol: "hysteria"` — непригоден для использования с Xray-core 26.x**
+
+Xray-core 26.x имеет задокументированные неисправленные проблемы с нативной реализацией Hysteria2 (`protocol: "hysteria"`):
+- `pinnedPeerCertSha256` не работает с CA-сертификатами: Xray пытается провалидировать цепочку сертификатов, получает ошибку (CA-сертификат не может быть листовым), и до проверки SHA256-пина не доходит (issues XTLS/Xray-core #5904, #5655)
+- Параметры `up`/`down` перемещены в `finalmask/quicParams` и выдают предупреждение при старте
+- Отсутствие `alpn: ["h3"]` в `tlsSettings` приводило к срыву TLS-хендшейка
+
+**2. `_save_xray_config()` писала в "мёртвый" файл**
+
+`/usr/local/etc/xray/config.json` — симлинк на `/etc/xray/config.json` (реальный файл, который читает Xray по `ExecStart`). Запись через `tmp.replace(p)` атомарно **заменяла симлинк обычным файлом**, после чего оба пути расходились: патч уходил в "осиротевшую" копию, а живой Xray продолжал работать со старым конфигом. Весь трафик продолжал идти через `direct`.
+
+**3. Catch-all routing-правило не переключалось на `proxy`**
+
+`h2_transport_apply()` добавлял outbound с тегом `proxy`, но не трогал routing. Catch-all правило `{network: "tcp,udp", outboundTag: "direct"}` продолжало направлять весь трафик напрямую — H2-outbound оставался "осиротевшим" и никогда не использовался.
+
+**4. Регенерация `config.json` откатывала активный H2-транспорт**
+
+Любой вызов `generate_xray_config_chain_entry_multi()` (смена DNS, RIPE-правил, добавление ноды и т.д.) полностью перезаписывал `config.json`, молча откатывая routing и outbound обратно на `direct`.
+
+**5. Hysteria2-сервер слушал `[::]` (IPv6-only) на IPv4-only VPS**
+
+`_generate_h2_config()` хардкодила `listen: "[::]:PORT"`. На VPS без IPv6 (частый случай) пакеты доходят до сетевого интерфейса (видно в `tcpdump`), но до процесса hysteria не доходят — IPv6-сокет не принимает IPv4-пакеты без dual-stack. Клиент получал timeout.
+
+**6. Сертификат не содержал `subjectAltName`**
+
+`openssl req -x509` без явного SAN генерирует сертификат без `subjectAltName`. Нативный hysteria2-клиент (в отличие от Xray) проверяет SAN при TLS-валидации и падал с `"x509: cannot validate certificate for X because it doesn't contain any IP SANs"`.
+
+**7. `insecure: false` + `pinSHA256` не работает с самоподписанными сертификатами**
+
+В нативном hysteria2-клиенте `pinSHA256` не обходит проверку цепочки CA. При `insecure: false` клиент падал с `"certificate signed by unknown authority"` до проверки пина. Нужно `insecure: true` + `pinSHA256` — пин обеспечивает безопасность, `insecure` только отключает проверку CA-цепочки.
+
+**8. Hysteria2-бинарь отсутствовал на Entry-ноде**
+
+При удалённой установке Exit-ноды через SSH бинарь `hysteria` устанавливался только на Exit. Entry-нода не получала его, что вызывало ошибку при попытке запустить `hysteria-client`.
+
+### Решение: полная смена архитектуры транспортного уровня
+
+Вместо Xray built-in `protocol: "hysteria"` теперь используется **нативный hysteria2-клиент** + **SOCKS5 outbound** в Xray:
+
+```
+Клиент → Xray (VLESS+Reality inbound)
+       → Xray (protocol: "socks" outbound → 127.0.0.1:10809)
+       → hysteria-client.service (нативный /usr/local/bin/hysteria client)
+       → Exit-нода (hysteria-server) → Интернет
+```
+
+Для конечного пользователя (VLESS-ссылки, клиентские приложения) ничего не изменилось.
+
+### Изменения в коде
+
+**`vless_installer/modules/hysteria2_transport.py`** — полная переработка:
+- Убран весь код генерации Xray `protocol: "hysteria"` outbound
+- `h2_transport_apply()`: генерирует `/etc/hysteria/client.yaml`, создаёт и запускает `hysteria-client.service`, патчит Xray outbound на `protocol: "socks"` → `127.0.0.1:10809`, переключает catch-all routing-правило на тег `proxy`
+- `h2_transport_remove()`: останавливает `hysteria-client.service`, восстанавливает предыдущий outbound и routing
+- `_find_xray_config()`: исправлен порядок путей — сначала `/etc/xray/config.json` (реальный), потом `/usr/local/etc/xray/config.json` (симлинк)
+- `_save_xray_config()`: запись идёт в `p.resolve()` если путь — симлинк, не ломая ссылку
+- `_write_h2_client_config()`: `insecure: true` + `pinSHA256` для самоподписанных сертификатов
+- `_ensure_hysteria_client_service()`: автоматическая загрузка бинаря на Entry-ноду если отсутствует
+
+**`vless_installer/modules/hysteria2_exit_mgr.py`**:
+- `_ensure_h2_cert()`: добавлен параметр `ip=`, сертификат генерируется с `-addext 'subjectAltName=IP:{ip}'` и `-addext 'basicConstraints=CA:FALSE'`; добавлен fallback через extfile для OpenSSL < 1.1.1; добавлена финальная проверка наличия SAN
+- `h2_exit_install()`: локальный IP определяется до вызова `_ensure_h2_cert()` и передаётся в него
+- `h2_exit_remote_install()`: определяет наличие IPv6 на удалённой ноде и выбирает `listen: "0.0.0.0:PORT"` или `listen: "[::]:PORT"` соответственно; команда генерации сертификата получила `-addext 'subjectAltName=IP:{host}'`
+
+**`vless_installer/_core.py`**:
+- Добавлена функция `_h2_reapply_transport_if_active()` — вызывается после любой регенерации `config.json`, автоматически восстанавливает H2-транспорт если он был активен
+
+---
+
+
 
 **Исправлено**
 
