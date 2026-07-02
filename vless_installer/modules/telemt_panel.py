@@ -393,7 +393,8 @@ def _hash_password(password: str) -> Optional[str]:
 # ══════════════════════════════════════════════════════════════════════════════
 def _generate_config(username: str, password_hash: str, jwt_secret: str,
                       telemt_api_token: str, base_path: str = "",
-                      geoip_db: str = "", geoip_asn_db: str = "") -> None:
+                      geoip_db: str = "", geoip_asn_db: str = "",
+                      telemt_bin_path: str = "", telemt_service_name: str = "") -> None:
     CONFIG_DIR.mkdir(parents=True, exist_ok=True)
     DATA_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -413,6 +414,17 @@ def _generate_config(username: str, password_hash: str, jwt_secret: str,
         # может задеть [server]/[network]/[access] (client_mss, MSS-clamp
         # порты SYN-limiter/iOS-фикса и т.д.), см. шапку файла.
         'config_edit_mode = "api"',
+    ]
+    if telemt_bin_path:
+        # Без этого поля панель по умолчанию считает, что Telemt лежит в
+        # /bin/telemt (хардкод в internal/config/config.go самой панели) —
+        # у нас он в /usr/local/bin/telemt, из-за чего self-update Telemt
+        # из веб-UI бил мимо и падал на "no write access to /bin".
+        lines.append(f'binary_path = "{telemt_bin_path}"')
+    if telemt_service_name:
+        lines.append(f'service_name = "{telemt_service_name}"')
+    lines.append('github_repo = "telemt/telemt"')
+    lines += [
         "",
         "[auth]",
         f'username = "{username}"',
@@ -450,9 +462,12 @@ Group={SYSTEM_USER}
 ExecStart={BIN_PATH} --config {CONFIG_FILE}
 Restart=on-failure
 RestartSec=3
+# NoNewPrivileges сознательно НЕ ставим: панель обновляет бинарник Telemt
+# (владелец root) через узкий sudoers drop-in (см. _install_sudoers ниже),
+# а NoNewPrivileges блокирует sudo на уровне ядра целиком, без обхода —
+# именно так это официально сделано в install.sh самого telemt_panel.
 ProtectHome=true
 PrivateTmp=true
-NoNewPrivileges=true
 ReadWritePaths={CONFIG_DIR} {DATA_DIR}
 
 [Install]
@@ -461,6 +476,79 @@ WantedBy=multi-user.target
     _run(["systemctl", "daemon-reload"])
     _run(["systemctl", "enable", SERVICE_NAME])
     _ok("systemd-юнит установлен и включён в автозапуск")
+
+def _install_sudoers(mp) -> bool:
+    """
+    Узкий sudoers drop-in — повторяет схему официального install.sh проекта
+    telemt_panel (install_sudoers_dropin() там же): NOPASSWD только на
+    конкретные команды с конкретными путями (никакого 'ALL'/wildcard на
+    сами команды) — cp/mv/chmod/rm строго по staging-файлам панели и
+    Telemt, плюс перезапуск/логи обеих служб. Без этого self-update Telemt
+    из веб-UI падает с "no write access ... sudo copy ... failed", т.к.
+    NoNewPrivileges снят, но самого правила sudo ещё не было.
+    """
+    def _which(cmd: str) -> str:
+        return shutil.which(cmd) or f"/usr/bin/{cmd}"
+
+    cp, mv, chmod, rm = _which("cp"), _which("mv"), _which("chmod"), _which("rm")
+    tee, systemctl, journalctl = _which("tee"), _which("systemctl"), _which("journalctl")
+
+    staging = DATA_DIR / "staging"
+    staging.mkdir(parents=True, exist_ok=True)
+    _run(["chown", f"{SYSTEM_USER}:{SYSTEM_USER}", str(staging)], check=False)
+
+    panel_tmp    = BIN_PATH.parent / f".{BIN_PATH.name}.tmp"
+    panel_backup = staging / f"{BIN_PATH.name}.bak"
+    panel_stage  = staging / BIN_PATH.name
+
+    telemt_bin    = mp.BIN_PATH
+    telemt_name   = telemt_bin.name
+    telemt_tmp    = telemt_bin.parent / f".{telemt_name}.tmp"
+    telemt_backup = staging / f"{telemt_name}.bak"
+    telemt_stage  = staging / telemt_name
+    telemt_service = mp.SERVICE_NAME
+    telemt_config  = mp.CONFIG_FILE
+
+    rules = [
+        f"{SYSTEM_USER} ALL=(root) NOPASSWD: {cp} -f {BIN_PATH} {panel_backup}",
+        f"{SYSTEM_USER} ALL=(root) NOPASSWD: {cp} -f {telemt_bin} {telemt_backup}",
+        f"{SYSTEM_USER} ALL=(root) NOPASSWD: {cp} -f {panel_stage} {panel_tmp}",
+        f"{SYSTEM_USER} ALL=(root) NOPASSWD: {cp} -f {telemt_stage} {telemt_tmp}",
+        f"{SYSTEM_USER} ALL=(root) NOPASSWD: {chmod} 0755 {panel_tmp}",
+        f"{SYSTEM_USER} ALL=(root) NOPASSWD: {chmod} 0755 {telemt_tmp}",
+        f"{SYSTEM_USER} ALL=(root) NOPASSWD: {mv} -f {panel_tmp} {BIN_PATH}",
+        f"{SYSTEM_USER} ALL=(root) NOPASSWD: {mv} -f {telemt_tmp} {telemt_bin}",
+        f"{SYSTEM_USER} ALL=(root) NOPASSWD: {rm} -f {panel_tmp}",
+        f"{SYSTEM_USER} ALL=(root) NOPASSWD: {rm} -f {telemt_tmp}",
+        f"{SYSTEM_USER} ALL=(root) NOPASSWD: {systemctl} restart {SERVICE_NAME}",
+        f"{SYSTEM_USER} ALL=(root) NOPASSWD: {systemctl} restart {telemt_service}",
+        f"{SYSTEM_USER} ALL=(root) NOPASSWD: {systemctl} start {SERVICE_NAME}",
+        f"{SYSTEM_USER} ALL=(root) NOPASSWD: {systemctl} start {telemt_service}",
+        f"{SYSTEM_USER} ALL=(root) NOPASSWD: {journalctl} -u {telemt_service} -n * --no-pager -o short-iso",
+        f"{SYSTEM_USER} ALL=(root) NOPASSWD: {journalctl} -u {telemt_service} -n * --since * --no-pager -o short-iso",
+        f"{SYSTEM_USER} ALL=(root) NOPASSWD: {journalctl} -u {telemt_service} -f --no-pager -o short-iso",
+        f"{SYSTEM_USER} ALL=(root) NOPASSWD: {journalctl} -u {telemt_service} -f --since * --no-pager -o short-iso",
+        f"{SYSTEM_USER} ALL=(root) NOPASSWD: {tee} {telemt_config}",
+    ]
+
+    tmp = Path(tempfile.mkdtemp()) / "telemt-panel.sudoers"
+    tmp.write_text("\n".join(rules) + "\n")
+
+    visudo = shutil.which("visudo")
+    if visudo:
+        r = _run([visudo, "-cf", str(tmp)], capture=True)
+        if r.returncode != 0:
+            _err(f"Сгенерированный sudoers-файл невалиден: {r.stdout} {r.stderr}")
+            shutil.rmtree(tmp.parent, ignore_errors=True)
+            return False
+
+    dest = Path("/etc/sudoers.d") / SERVICE_NAME
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(str(tmp), str(dest))
+    dest.chmod(0o440)
+    shutil.rmtree(tmp.parent, ignore_errors=True)
+    _ok(f"sudoers drop-in установлен: {dest}")
+    return True
 
 # ══════════════════════════════════════════════════════════════════════════════
 #  УСТАНОВКА
@@ -549,8 +637,12 @@ def _run_install() -> None:
 
     # ── 5. Конфиг + systemd
     _generate_config(username, password_hash, jwt_secret, telemt_api_token, base_path,
-                      geoip_db, geoip_asn_db)
+                      geoip_db, geoip_asn_db,
+                      telemt_bin_path=str(mp.BIN_PATH), telemt_service_name=mp.SERVICE_NAME)
     _install_service()
+    if not _install_sudoers(mp):
+        _warn("sudoers drop-in не встал — self-update Telemt/панели из веб-UI работать не будет,")
+        _warn("остальной функционал панели это не затрагивает.")
     _run(["systemctl", "restart", SERVICE_NAME])
 
     if _is_active():
