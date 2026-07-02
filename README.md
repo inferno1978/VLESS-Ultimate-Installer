@@ -229,7 +229,7 @@ sudo python3 /opt/vless-ultimate/main.py --dpi-check
 sudo python3 /opt/vless-ultimate/main.py --update-ru-subnets
 sudo python3 /opt/vless-ultimate/main.py --update-as-direct
 sudo python3 /opt/vless-ultimate/main.py --ingress-geoip-update
-sudo python3 /opt/vless-ultimate/main.py --telemt-panel-geoip-update   # [v4.12.11] DB-IP Lite, без MaxMind-аккаунта; --maxmind — зеркало GeoLite2
+sudo python3 /opt/vless-ultimate/main.py --telemt-panel-geoip-update   # DB-IP Lite, без MaxMind-аккаунта; --maxmind — зеркало GeoLite2
 sudo python3 /opt/vless-ultimate/main.py --pinned-fallback-check
 sudo python3 /opt/vless-ultimate/main.py --tg-event EVENT MSG
 sudo python3 /opt/vless-ultimate/main.py --clear-asn-cache
