@@ -458,12 +458,14 @@ def h2_exit_remote_install(
     ssh_pass: Optional[str] = None,
     ports: Optional[list[int]] = None,
     auth_password: str = "",
+    ssh_port: int = 22,
 ) -> bool:
     """
     Устанавливает Hysteria2 на удалённую Exit-ноду через SSH.
     Использует тот же SSH-паттерн что cluster_ops.
+    ssh_port — SSH-порт удалённой ноды (по умолчанию 22).
     """
-    info(f"Удалённая установка H2 → {host}")
+    info(f"Удалённая установка H2 → {host}:{ssh_port}")
     if not ports:
         ports = [443]
     if not auth_password:
@@ -476,7 +478,8 @@ def h2_exit_remote_install(
         return False
 
     # Определяем архитектуру удалённой машины, а не локальной
-    ssh_opts_pre = ["-o", "StrictHostKeyChecking=no", "-o", "ConnectTimeout=15"]
+    ssh_opts_pre = ["-o", "StrictHostKeyChecking=no", "-o", "ConnectTimeout=15",
+                    "-p", str(ssh_port)]
     if ssh_key:
         ssh_opts_pre += ["-i", ssh_key]
     _arch_cmd = ["ssh"] + ssh_opts_pre + [f"root@{host}", "uname -m"]
@@ -643,14 +646,16 @@ def _generate_systemd_remote() -> str:
 
 
 # ── Интерактивное меню ────────────────────────────────────────────────────────
-def _h2_remote_status(host: str, ssh_key: Optional[str], ssh_pass: Optional[str]) -> dict:
+def _h2_remote_status(host: str, ssh_key: Optional[str], ssh_pass: Optional[str],
+                      ssh_port: int = 22) -> dict:
     """
     Реальная проверка статуса H2 на удалённой ноде по SSH — в отличие от
     h2_exit_status(), которая всегда смотрит только на ЭТУ (локальную) ноду.
     """
     if ssh_pass and not _h2_ensure_sshpass():
         return {"error": "sshpass недоступен"}
-    ssh_opts = ["-o", "StrictHostKeyChecking=no", "-o", "ConnectTimeout=10"]
+    ssh_opts = ["-o", "StrictHostKeyChecking=no", "-o", "ConnectTimeout=10",
+                "-p", str(ssh_port)]
     if ssh_key:
         ssh_opts += ["-i", ssh_key]
     remote_cmd = (
@@ -685,11 +690,13 @@ def _interactive_remote_status() -> None:
         warn("IP не указан")
         time.sleep(1)
         return
+    _sp_raw = input(f"  SSH-порт [22]: ").strip()
+    ssh_port = int(_sp_raw) if _sp_raw.isdigit() else 22
     ssh_key = input("  Путь к SSH-ключу (пусто = пароль): ").strip() or None
     ssh_pass = None
     if not ssh_key:
         ssh_pass = getpass.getpass("  SSH-пароль: ").strip() or None
-    st = _h2_remote_status(host, ssh_key, ssh_pass)
+    st = _h2_remote_status(host, ssh_key, ssh_pass, ssh_port=ssh_port)
     os.system("clear")
     print()
     _box_top(f"📊  СТАТУС УДАЛЁННОЙ EXIT-НОДЫ {host}")
@@ -829,6 +836,8 @@ def _interactive_remote_install() -> None:
         ports = [int(p.strip()) for p in raw_ports.split(",") if p.strip().isdigit()] \
             if raw_ports else [443]
         ssh_key = input(f"  {CYAN}Путь к SSH-ключу{NC} (пусто = пароль): ").strip() or None
+        _sp_raw = input(f"  {CYAN}SSH-порт{NC} [{CYAN}22{NC}]: ").strip()
+        ssh_port = int(_sp_raw) if _sp_raw.isdigit() else 22
         ssh_pass = getpass.getpass(f"  {CYAN}SSH-пароль{NC} (пусто = ключ): ") if not ssh_key else None
         raw_pass = input(f"  {CYAN}Пароль H2{NC} (пусто = авто): ").strip()
     except KeyboardInterrupt:
@@ -836,7 +845,7 @@ def _interactive_remote_install() -> None:
 
     auth = raw_pass or secrets.token_urlsafe(24)
     h2_exit_remote_install(host, ssh_key=ssh_key, ssh_pass=ssh_pass,
-                            ports=ports, auth_password=auth)
+                            ports=ports, auth_password=auth, ssh_port=ssh_port)
     input(f"\n{BLUE}Нажмите Enter...{NC}")
 
 
