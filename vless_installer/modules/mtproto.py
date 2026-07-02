@@ -566,7 +566,8 @@ def _write_config(port, ipv4, ipv6, tls_domain, users, use_middle_proxy,
                 _warn(f"Не удалось записать [middle_proxy]: {_e}")
 
 
-def ensure_api_enabled(token: str, host: str = "127.0.0.1", port: int = 9091) -> tuple:
+def ensure_api_enabled(token: str, host: str = "127.0.0.1", port: int = 9091,
+                        grant_read_to: str = "") -> tuple:
     """
     Включает/обновляет секцию [api] в telemt.toml — единая точка правды для
     файла конфига Telemt (используется telemt_panel.py, чтобы не плодить
@@ -574,6 +575,13 @@ def ensure_api_enabled(token: str, host: str = "127.0.0.1", port: int = 9091) ->
 
     Идемпотентно: если секция уже есть — просто обновляет listen/token,
     ничего больше в файле не трогает (порядок остальных секций сохраняется).
+
+    grant_read_to — если указано системное имя группы/пользователя (обычно
+    telemt-panel), файлу назначается эта группа-владелец с правом чтения
+    (0640) — иначе панель, читая конфиг напрямую в файловом режиме, падает
+    с "permission denied" (владелец файла — root, группа по умолчанию тоже
+    root, у непривилегированного юзера панели доступа нет).
+
     Возвращает (ok: bool, message: str).
     """
     if not CONFIG_FILE.exists():
@@ -601,6 +609,12 @@ def ensure_api_enabled(token: str, host: str = "127.0.0.1", port: int = 9091) ->
         action = "добавлена"
 
     CONFIG_FILE.write_text(text)
+
+    if grant_read_to:
+        r_grp = _run(["chgrp", grant_read_to, str(CONFIG_FILE)])
+        if r_grp.returncode == 0:
+            CONFIG_FILE.chmod(0o640)
+
     r = _run(["systemctl", "restart", SERVICE_NAME])
     if r.returncode != 0:
         return False, f"Секция [api] {action}, но перезапуск Telemt не удался."

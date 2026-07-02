@@ -278,8 +278,12 @@ def _create_system_user() -> None:
     r = _run(["id", SYSTEM_USER], capture=True)
     if r.returncode == 0:
         return
+    # Явно создаём группу — не полагаемся на USERGROUPS_ENAB дистрибутива
+    # (без неё chgrp в ensure_api_enabled() бьёт мимо несуществующей группы).
+    _run(["groupadd", "--system", SYSTEM_USER], check=False)
     _run(["useradd", "--system", "--shell", "/usr/sbin/nologin",
-          "--home", "/nonexistent", "--no-create-home", SYSTEM_USER], check=False)
+          "--home", "/nonexistent", "--no-create-home",
+          "--gid", SYSTEM_USER, SYSTEM_USER], check=False)
     _ok(f"Системный пользователь {SYSTEM_USER} создан")
 
 def _hash_password(password: str) -> Optional[str]:
@@ -382,26 +386,28 @@ def _run_install() -> None:
     _box_bot()
     print()
 
-    # ── 1. Включаем [api] в конфиге telemt (единая точка правды — mtproto.py)
+    # ── 1. Системный пользователь + группа — ДО включения [api], иначе
+    #      chgrp внутри ensure_api_enabled() бьёт мимо ещё не созданной группы.
+    _create_system_user()
+
+    # ── 2. Включаем [api] в конфиге telemt (единая точка правды — mtproto.py)
     _info("Проверяю/включаю API у Telemt...")
     telemt_api_token = secrets.token_hex(24)
-    ok, msg = mp.ensure_api_enabled(telemt_api_token, host=TELEMT_API_HOST, port=TELEMT_API_PORT)
+    ok, msg = mp.ensure_api_enabled(telemt_api_token, host=TELEMT_API_HOST, port=TELEMT_API_PORT,
+                                     grant_read_to=SYSTEM_USER)
     if not ok:
         _err(f"Не удалось включить API Telemt: {msg}")
         _pause()
         return
     _ok(msg)
 
-    # ── 2. Скачиваем бинарник панели
+    # ── 3. Скачиваем бинарник панели
     tag, url = _get_latest_release()
     if not url:
         _pause(); return
     _info(f"Последний релиз: {tag or '?'}")
     if not _install_binary(url):
         _pause(); return
-
-    # ── 3. Системный пользователь + директории
-    _create_system_user()
 
     # ── 4. Учётные данные панели
     print()
