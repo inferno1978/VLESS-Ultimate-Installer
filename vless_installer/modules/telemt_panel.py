@@ -23,6 +23,7 @@ vless_installer/modules/telemt_panel.py
 
 from __future__ import annotations
 
+import gzip
 import json
 import os
 import platform
@@ -231,6 +232,100 @@ def _telemt_is_installed(mp) -> bool:
     return bool(mp) and mp.CONFIG_FILE.exists() and mp.BIN_PATH.exists()
 
 # ══════════════════════════════════════════════════════════════════════════════
+#  GEOIP — АВТОЗАГРУЗКА БЕЗ РЕГИСТРАЦИИ У MAXMIND
+# ══════════════════════════════════════════════════════════════════════════════
+# RIPE NCC (stat.ripe.net) отдаёт только announced-prefixes (CIDR ↔ ASN) —
+# это не гео-база, там нет ни страны, ни города, ни формата MMDB, который
+# ждёт GeoIP2-ридер панели. Поэтому вместо RIPE берём готовые .mmdb базы,
+# зеркалируемые через jsDelivr CDN (проект wp-statistics): формат полностью
+# совместим со схемой MaxMind, скачивание без ключей и аккаунта.
+GEOIP_DIR = DATA_DIR / "geoip"
+GEOIP_SOURCES = {
+    "dbip":    ("https://cdn.jsdelivr.net/npm/dbip-city-lite/dbip-city-lite.mmdb.gz", "dbip-city-lite.mmdb"),
+    "maxmind": ("https://cdn.jsdelivr.net/npm/geolite2-city/GeoLite2-City.mmdb.gz",   "GeoLite2-City.mmdb"),
+    "asn":     ("https://cdn.jsdelivr.net/npm/geolite2-asn/GeoLite2-ASN.mmdb.gz",     "GeoLite2-ASN.mmdb"),
+}
+
+def _http_get(url: str, timeout: int = 60) -> Optional[bytes]:
+    try:
+        req = urllib.request.Request(url, headers={"User-Agent": "VLESS-Ultimate-Installer"})
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            return r.read()
+    except Exception:
+        return None
+
+def _geoip_fetch(url: str, dest: Path) -> bool:
+    raw = _http_get(url)
+    if not raw:
+        return False
+    try:
+        data = gzip.decompress(raw)
+    except OSError:
+        return False
+    if len(data) < 1024:
+        return False
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    dest.write_bytes(data)
+    return True
+
+def _geoip_auto_download(use_maxmind_mirror: bool = False) -> tuple:
+    """Возвращает (city_mmdb_path, asn_mmdb_path); пустая строка при неудаче."""
+    city_key = "maxmind" if use_maxmind_mirror else "dbip"
+    city_url, city_name = GEOIP_SOURCES[city_key]
+    asn_url, asn_name = GEOIP_SOURCES["asn"]
+    city_dest, asn_dest = GEOIP_DIR / city_name, GEOIP_DIR / asn_name
+
+    _info(f"Скачиваю City-базу ({'MaxMind mirror' if use_maxmind_mirror else 'DB-IP Lite'})...")
+    city_ok = _geoip_fetch(city_url, city_dest)
+    if city_ok:
+        _ok(f"City-база сохранена: {city_dest}")
+    else:
+        _warn("Не удалось скачать City-базу.")
+
+    _info("Скачиваю ASN-базу...")
+    asn_ok = _geoip_fetch(asn_url, asn_dest)
+    if asn_ok:
+        _ok(f"ASN-база сохранена: {asn_dest}")
+    else:
+        _warn("Не удалось скачать ASN-базу.")
+
+    if GEOIP_DIR.exists():
+        _run(["chown", "-R", f"{SYSTEM_USER}:{SYSTEM_USER}", str(GEOIP_DIR)], check=False)
+
+    return (str(city_dest) if city_ok else "", str(asn_dest) if asn_ok else "")
+
+def _geoip_patch_config(geoip_db: str, geoip_asn_db: str) -> None:
+    """Правит только секцию [geoip] в уже существующем config.toml, не трогая остальное."""
+    if not CONFIG_FILE.exists():
+        return
+    text = re.split(r"\n\[geoip\]\n.*", CONFIG_FILE.read_text(), flags=re.S)[0].rstrip() + "\n"
+    if geoip_db:
+        text += "\n[geoip]\n" + f'db_path = "{geoip_db}"\n'
+        if geoip_asn_db:
+            text += f'asn_db_path = "{geoip_asn_db}"\n'
+    CONFIG_FILE.write_text(text)
+    CONFIG_FILE.chmod(0o640)
+    _run(["chown", f"{SYSTEM_USER}:{SYSTEM_USER}", str(CONFIG_FILE)], check=False)
+
+def _geoip_update_flow() -> None:
+    """Отдельное обновление GeoIP-баз без переустановки панели (пункт меню '5')."""
+    if not _is_installed():
+        _warn("Telemt Panel не установлена."); _pause(); return
+    _box_top("GEOIP — ОБНОВЛЕНИЕ БАЗ")
+    _box_row()
+    _box_item("1", "DB-IP Lite (без регистрации, обновляется ежемесячно)")
+    _box_item("2", "MaxMind GeoLite2 (стороннее CDN-зеркало)")
+    _box_bot(); print()
+    ch = _ask("  Выбор [1/2, Enter=1]: ", "1", c=True).strip()
+    city_db, asn_db = _geoip_auto_download(use_maxmind_mirror=(ch == "2"))
+    if not city_db:
+        _pause(); return
+    _geoip_patch_config(city_db, asn_db)
+    _run(["systemctl", "restart", SERVICE_NAME])
+    _ok("GeoIP базы обновлены, панель перезапущена.")
+    _pause()
+
+# ══════════════════════════════════════════════════════════════════════════════
 #  СКАЧИВАНИЕ / УСТАНОВКА БИНАРНИКА ПАНЕЛИ
 # ══════════════════════════════════════════════════════════════════════════════
 def _get_latest_release() -> tuple:
@@ -297,7 +392,8 @@ def _hash_password(password: str) -> Optional[str]:
 #  КОНФИГ ПАНЕЛИ
 # ══════════════════════════════════════════════════════════════════════════════
 def _generate_config(username: str, password_hash: str, jwt_secret: str,
-                      telemt_api_token: str, base_path: str = "") -> None:
+                      telemt_api_token: str, base_path: str = "",
+                      geoip_db: str = "", geoip_asn_db: str = "") -> None:
     CONFIG_DIR.mkdir(parents=True, exist_ok=True)
     DATA_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -329,6 +425,10 @@ def _generate_config(username: str, password_hash: str, jwt_secret: str,
         f'service_name = "{SERVICE_NAME}"',
         'github_repo = "amirotin/telemt_panel"',
     ]
+    if geoip_db:
+        lines += ["", "[geoip]", f'db_path = "{geoip_db}"']
+        if geoip_asn_db:
+            lines.append(f'asn_db_path = "{geoip_asn_db}"')
     CONFIG_FILE.write_text("\n".join(lines) + "\n")
     CONFIG_FILE.chmod(0o640)
     _run(["chown", f"{SYSTEM_USER}:{SYSTEM_USER}", str(CONFIG_FILE)], check=False)
@@ -425,8 +525,31 @@ def _run_install() -> None:
 
     base_path = _ask(f"  Base path за reverse-proxy (Enter — не использовать): ", "", c=True)
 
+    # ── 4.5. GeoIP (необязательно) — страна/город клиентов по IP.
+    print()
+    _box_info("GeoIP (необязательно) — показывает страну/город по IP клиентов.")
+    _box_item("1", "Скачать автоматически (DB-IP Lite, без регистрации)")
+    _box_item("2", "Указать путь к своим .mmdb вручную")
+    _box_item("3", "Пропустить (включить можно будет позже, пункт '5')")
+    geoip_choice = _ask("  Выбор [1/2/3, Enter=1]: ", "1", c=True).strip()
+
+    geoip_db, geoip_asn_db = "", ""
+    if geoip_choice == "1":
+        geoip_db, geoip_asn_db = _geoip_auto_download()
+    elif geoip_choice == "2":
+        geoip_db = _ask("  Путь к City .mmdb (Enter — пропустить): ", "", c=True)
+        if geoip_db and not Path(geoip_db).is_file():
+            _warn(f"Файл не найден: {geoip_db} — GeoIP не будет включён.")
+            geoip_db = ""
+        elif geoip_db:
+            geoip_asn_db = _ask("  Путь к ASN .mmdb (Enter — пропустить): ", "", c=True)
+            if geoip_asn_db and not Path(geoip_asn_db).is_file():
+                _warn(f"Файл не найден: {geoip_asn_db} — ASN-данные не будут включены.")
+                geoip_asn_db = ""
+
     # ── 5. Конфиг + systemd
-    _generate_config(username, password_hash, jwt_secret, telemt_api_token, base_path)
+    _generate_config(username, password_hash, jwt_secret, telemt_api_token, base_path,
+                      geoip_db, geoip_asn_db)
     _install_service()
     _run(["systemctl", "restart", SERVICE_NAME])
 
@@ -511,6 +634,7 @@ def telemt_panel_menu() -> None:
         _box_item("2", "📋  Статус")
         _box_item("3", "🔄  Перезапустить сервис")
         _box_item("4", "⬆️   Проверить и обновить")
+        _box_item("5", "🌍  Обновить GeoIP-базы")
         _box_item("8", f"{RED}🗑️   Полное удаление{NC}")
         _box_sep()
         _box_item("Q", "← Назад в меню Telemt")
@@ -532,6 +656,8 @@ def telemt_panel_menu() -> None:
             _ok("Сервис перезапущен."); _pause()
         elif ch == "4":
             _update()
+        elif ch == "5":
+            _geoip_update_flow()
         elif ch == "8":
             _uninstall()
         elif ch in ("q", ""):

@@ -205,6 +205,25 @@ if "--ingress-geoip-update" in sys.argv:
     print("[ingress-geoip] Готово")
     sys.exit(0)
 
+# --- Обновление GeoIP-баз Telemt Panel (из cron ежемесячно) ---
+if "--telemt-panel-geoip-update" in sys.argv:
+    if os.geteuid() != 0:
+        print("ERROR: требуются права root", file=sys.stderr)
+        sys.exit(1)
+    from vless_installer.modules import telemt_panel as _tp
+    if not _tp._is_installed():
+        print("[telemt-panel-geoip] Панель не установлена — пропуск")
+        sys.exit(0)
+    use_maxmind = "--maxmind" in sys.argv
+    city_db, asn_db = _tp._geoip_auto_download(use_maxmind_mirror=use_maxmind)
+    if not city_db:
+        print("[telemt-panel-geoip] Не удалось скачать City-базу", file=sys.stderr)
+        sys.exit(1)
+    _tp._geoip_patch_config(city_db, asn_db)
+    _tp._run(["systemctl", "restart", _tp.SERVICE_NAME])
+    print("[telemt-panel-geoip] GeoIP базы обновлены, панель перезапущена")
+    sys.exit(0)
+
 # --- Hysteria2: установка Exit-ноды ---
 if "--h2-install-exit" in sys.argv:
     if os.geteuid() != 0:
